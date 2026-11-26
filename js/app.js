@@ -13,7 +13,6 @@
   const Geo = window.NaviGeometry;
   const CFG = window.APP_CONFIG;
   const MODE_ORDER = ['city', 'highway', 'mountain'];
-  const ELEVATED_Z_OFFSET_M = 8.0;
   const UNDERPASS_OPACITY = 0.22;
 
   // =========================================================================
@@ -33,14 +32,13 @@
     closeZoomStep: null,
     lastManeuverDirectDistM: Infinity,
 
-    // Overpass ("上") vs Underpass ("下") Elevation & See-Through Manager
+    // Overpass vs Underpass See-Through Manager (strictly road-surface clamped, zero Z lift)
     elevation: {
       state: 'surface', // 'surface' | 'elevated' | 'underpass'
       hasBridgeOverhead: false,
       isHighwayRoute: false,
       lastCheckTs: 0,
-      targetZOffsetM: 0,
-      currentCarAltitudeM: 0,
+      groundElevationM: 0,
       show3dObjectsApplied: true,
       dimmedBridgeLayers: new Map(),
     },
@@ -133,9 +131,19 @@
 
   const dom = {
     app: $('cockpit-app'),
+    mapContainer: $('map'),
 
-    // Left Edge: Tesla-style Unified Panel
-    teslaLeftPanel: $('tesla-left-panel'),
+    // Left Edge: OEM Hardware Capacitive Touch Bezel (4 items)
+    navBezel: $('nav-bezel'),
+    bezelClock: $('bezel-clock'),
+    btnModeCycle: $('btn-mode-cycle'),
+    modeCycleIcon: $('mode-cycle-icon'),
+    modeCycleLabel: $('mode-cycle-label'),
+    btnMenuToggle: $('btn-menu-toggle'),
+    btnRecenter: $('btn-recenter'),
+
+    // Right Edge (Pattern B): Tesla-style Unified Panel
+    teslaPanel: $('tesla-panel'),
     speedValue: $('speed-value'),
     speedBarFill: $('speed-bar-fill'),
     headingVal: $('heading-val'),
@@ -159,15 +167,7 @@
     initialdDirLabel: $('initiald-dir-label'),
     initialdRankLabel: $('initiald-rank-label'),
 
-    // Right Edge: Slim 4-Item Dock
-    dockClock: $('dock-clock'),
-    btnModeCycle: $('btn-mode-cycle'),
-    modeCycleIcon: $('mode-cycle-icon'),
-    modeCycleLabel: $('mode-cycle-label'),
-    btnMenuToggle: $('btn-menu-toggle'),
-    btnRecenter: $('btn-recenter'),
-
-    // Hidden Slide-Out Menu Drawer
+    // Slide-Out Menu Drawer (opens beside left bezel)
     menuDrawer: $('menu-drawer'),
     btnMenuClose: $('btn-menu-close'),
     searchForm: $('search-form'),
@@ -218,11 +218,11 @@
   };
 
   // =========================================================================
-  // SVG Icon Library (Mode Dock / Turn Maneuvers / Initial-D Mountain Arrows)
+  // SVG Icon Library (Bezel Touch Icons / Turn Maneuvers / Initial-D Arrows)
   // =========================================================================
   function getModeIconSvg(modeId) {
     const common =
-      'width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+      'width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"';
     if (modeId === 'highway') {
       return `<svg ${common}><path d="M6 21 9 3M18 21 15 3M12 6v3M12 13v3M12 19v2"/></svg>`;
     }
@@ -232,10 +232,10 @@
     return `<svg ${common}><path d="M3 21h18M5 21V7l6-4v18M13 21V11l6-3v13M8 10h.01M8 14h.01M16 14h.01M16 17h.01"/></svg>`;
   }
 
-  function getModeDockShortLabel(modeId) {
-    if (modeId === 'highway') return '高速';
-    if (modeId === 'mountain') return '山';
-    return '市街地';
+  function getModeBezelLabel(modeId) {
+    if (modeId === 'highway') return 'HIGHWAY';
+    if (modeId === 'mountain') return 'MOUNTAIN';
+    return 'CITY';
   }
 
   function getManeuverSvg(key) {
@@ -289,13 +289,13 @@
   }
 
   // =========================================================================
-  // Live Clock (Right Dock Item 1) & Toast Notifications
+  // Live Clock (Left Hardware Bezel Item 1) & Toast Notifications
   // =========================================================================
   function updateLiveClock() {
     const now = new Date();
     const hh = String(now.getHours()).padStart(2, '0');
     const mm = String(now.getMinutes()).padStart(2, '0');
-    dom.dockClock.textContent = `${hh}:${mm}`;
+    dom.bezelClock.textContent = `${hh}:${mm}`;
   }
 
   function showToast(message, type = 'info', durationMs = 2600) {
@@ -449,8 +449,9 @@
    * 自車位置を常に画面下部1/4へ配置するパディング
    */
   function getCockpitPadding() {
+    const h = (dom.mapContainer && dom.mapContainer.clientHeight) || window.innerHeight;
     return {
-      top: Math.round(window.innerHeight * 0.55),
+      top: Math.round(h * 0.55),
       bottom: 0,
       left: 0,
       right: 0,
@@ -590,11 +591,10 @@
 
   /**
    * 路面標示（白線・進行矢印）を隠さない半透明＆車線幅スリムルート描画：
-   *  - slot: 'middle'
+   *  - slot: 'middle'（道路ポリゴン表面へ密着、浮き上がり防止のため line-z-offset 非使用）
    *  - line-color: '#3b82f6'
    *  - line-opacity: 0.55
    *  - line-width: ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18]
-   *  - line-elevation-reference: 'ground' / line-z-offset（高架上では +8m に持ち上げ）
    *  - line-occlusion-opacity + 高架下時のみ表示される X-Ray レイヤー
    */
   function setupRouteLayers(map) {
@@ -607,8 +607,6 @@
         layout: {
           'line-join': 'round',
           'line-cap': 'round',
-          'line-elevation-reference': 'ground',
-          'line-z-offset': 0,
         },
         paint: {
           'line-color': '#3b82f6',
@@ -629,8 +627,6 @@
         layout: {
           'line-join': 'round',
           'line-cap': 'round',
-          'line-elevation-reference': 'ground',
-          'line-z-offset': 0,
         },
         paint: {
           'line-color': '#3b82f6',
@@ -651,8 +647,6 @@
         layout: {
           'line-join': 'round',
           'line-cap': 'round',
-          'line-elevation-reference': 'ground',
-          'line-z-offset': 0,
         },
         paint: {
           'line-color': '#60a5fa',
@@ -836,29 +830,17 @@
 
   function applyElevationVisuals(elevState) {
     const map = state.map;
-    const isElevated = elevState === 'elevated';
     const isUnderpass = elevState === 'underpass';
-
-    state.elevation.targetZOffsetM = isElevated ? ELEVATED_Z_OFFSET_M : 0;
 
     if (!map || !state.mapReady) {
       updateElevationBadgeUi();
       return;
     }
 
-    // 1. Update route line-z-offset (+8m on elevated highways, 0m on surface/underpass)
-    const routeLayerIds = ['route-core-ribbon', 'route-traveled-line', 'jct-segment-core'];
-    routeLayerIds.forEach((id) => {
-      if (!map.getLayer(id)) return;
-      try {
-        map.setLayoutProperty(id, 'line-z-offset', state.elevation.targetZOffsetM);
-      } catch (_e) {}
-    });
-
-    // 2. Scan and dim classic/custom bridge layers (0.22 opacity) when underpass, or restore
+    // 1. Scan and dim classic/custom bridge layers (0.22 opacity) when underpass, or restore
     setStyleBridgeLayersOpacity(map, isUnderpass);
 
-    // 3. Mapbox Standard Style basemap: temporarily flatten overhead 3D structures in underpass mode
+    // 2. Mapbox Standard Style basemap: temporarily flatten overhead 3D structures in underpass mode
     const desiredShow3d = !isUnderpass;
     if (state.elevation.show3dObjectsApplied !== desiredShow3d) {
       try {
@@ -867,7 +849,7 @@
       } catch (_e) {}
     }
 
-    // 4. Toggle X-Ray occlusion route overlay for underpass see-through clarity
+    // 3. Toggle X-Ray occlusion route overlay for underpass see-through clarity
     if (map.getLayer('route-xray-underpass')) {
       try {
         map.setLayoutProperty('route-xray-underpass', 'visibility', isUnderpass ? 'visible' : 'none');
@@ -914,7 +896,7 @@
     dom.elevationStatusPill.classList.remove('hidden', 'elev-up', 'elev-under');
     if (elev === 'elevated') {
       dom.elevationStatusPill.classList.add('elev-up');
-      dom.elevationStatusPill.textContent = '高架上 +8m';
+      dom.elevationStatusPill.textContent = '高架';
     } else if (elev === 'underpass') {
       dom.elevationStatusPill.classList.add('elev-under');
       dom.elevationStatusPill.textContent = '高架下 透過';
@@ -1016,7 +998,8 @@
   function updateModeButtonsUi(modeId) {
     const modeCfg = CFG.modes[modeId];
     dom.modeCycleIcon.innerHTML = getModeIconSvg(modeId);
-    dom.modeCycleLabel.textContent = getModeDockShortLabel(modeId);
+    dom.modeCycleLabel.textContent = getModeBezelLabel(modeId);
+    dom.btnModeCycle.classList.add('is-lit');
     dom.modeStatusPill.textContent = modeCfg.label;
   }
 
@@ -1188,7 +1171,7 @@
 
     if (state.sim.forceCloseZoom && !state.followCamera) {
       state.followCamera = true;
-      dom.btnRecenter.classList.add('active');
+      dom.btnRecenter.classList.add('is-lit');
       dom.btnRecenter.classList.remove('attention');
     }
 
@@ -1271,7 +1254,7 @@
 
   function setFollowCamera(enabled) {
     state.followCamera = enabled;
-    dom.btnRecenter.classList.toggle('active', enabled);
+    dom.btnRecenter.classList.toggle('is-lit', enabled);
     dom.btnRecenter.classList.toggle('attention', !enabled);
     if (enabled && state.map && state.mapReady) {
       const targetZoom = Geo.computeSpeedAdaptiveZoom(
@@ -1899,29 +1882,20 @@
     state.displayHeading = Geo.lerpBearing(state.displayHeading, state.vehicle.heading, smoothFactor);
 
     if (state.map && state.mapReady) {
-      let terrainElevExaggerated = 0;
-      if (state.mode === 'mountain' && typeof state.map.queryTerrainElevation === 'function') {
-        const rawElev = state.map.queryTerrainElevation(state.displayCoords, { exaggerated: false });
-        if (Number.isFinite(rawElev)) {
-          state.vehicle.altitudeM = Math.round(rawElev);
-        }
-        const visElev = state.map.queryTerrainElevation(state.displayCoords, { exaggerated: true });
-        if (Number.isFinite(visElev)) {
-          terrainElevExaggerated = visElev;
-        }
+      const groundElev =
+        (typeof state.map.queryTerrainElevation === 'function'
+          ? state.map.queryTerrainElevation(state.displayCoords, { exaggerated: false })
+          : 0) || 0;
+      state.elevation.groundElevationM = groundElev;
+      if (state.mode === 'mountain') {
+        state.vehicle.altitudeM = Math.round(groundElev);
       }
-
-      const targetCarAltM = terrainElevExaggerated + state.elevation.targetZOffsetM;
-      const altLerp = Math.min(1, dtSec * 6.5);
-      state.elevation.currentCarAltitudeM +=
-        (targetCarAltM - state.elevation.currentCarAltitudeM) * altLerp;
 
       if (state.car3d) {
         state.car3d.updatePose({
           lng: state.displayCoords[0],
           lat: state.displayCoords[1],
           heading: state.displayHeading,
-          altitudeM: state.elevation.currentCarAltitudeM,
           isDeadReckoning: state.gps.isDeadReckoning,
           underpassSeeThrough: state.elevation.state === 'underpass',
         });
@@ -2018,12 +1992,11 @@
       dom.dbgPitch.textContent = state.map
         ? `${Math.round(state.map.getPitch())}°`
         : `${Math.round(state.currentPitch)}°`;
+      const groundM = Math.round(state.elevation.groundElevationM || 0);
       dom.dbgElev.textContent =
-        state.elevation.state === 'elevated'
-          ? '高架上 (+8m)'
-          : state.elevation.state === 'underpass'
-          ? '高架下 (透過)'
-          : '一般道 (0m)';
+        state.elevation.state === 'underpass'
+          ? `${groundM}m (透過)`
+          : `${groundM}m`;
       dom.dbgAutoZoom.textContent = state.sim.forceCloseZoom
         ? 'FORCED'
         : state.autoCloseZoomActive
@@ -2072,7 +2045,7 @@
         mode === 'highway' ? 'IC / JCT 監視' : mode === 'mountain' ? '3D地形・カーブ解析' : 'Standard 3D';
       dom.zoomActivePill.classList.toggle('hidden', !state.sim.forceCloseZoom);
       if (state.sim.forceCloseZoom) dom.zoomActivePill.textContent = '強制ZOOM';
-      dom.guidanceInstruction.textContent = '右メニューまたはマップタップで目的地設定';
+      dom.guidanceInstruction.textContent = '左ベゼルのMENUまたはマップタップで目的地設定';
       return;
     }
 
@@ -2091,7 +2064,7 @@
       return;
     }
 
-    // City & Mountain Mode left-panel turn guidance
+    // City & Mountain Mode turn guidance
     const step = state.closeZoomStep || nav.nextStep;
     const distMeters =
       mode === 'city' && Number.isFinite(state.lastManeuverDirectDistM)
@@ -2117,7 +2090,7 @@
   function setMenuDrawerOpen(open) {
     state.menuOpen = Boolean(open);
     dom.menuDrawer.classList.toggle('collapsed', !state.menuOpen);
-    dom.btnMenuToggle.classList.toggle('active', state.menuOpen);
+    dom.btnMenuToggle.classList.toggle('is-lit', state.menuOpen);
     dom.btnMenuToggle.setAttribute('aria-expanded', String(state.menuOpen));
   }
 

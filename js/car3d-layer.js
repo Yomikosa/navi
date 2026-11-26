@@ -2,11 +2,12 @@
  * AERO-DRIVE 3D Ego Vehicle Layer (Three.js Custom WebGL Layer for Mapbox GL JS v3)
  *
  * Renders a sculpted 3D sports-sedan mesh synced directly to Mapbox's 3D camera
- * projection matrix (pitch, bearing, zoom, altitude):
+ * projection matrix (pitch, bearing, zoom, exact terrain elevation):
  *  - Metallic pearl body, tinted panoramic cabin/windshield glass, wheels, LED headlights & tail-light bar
- *  - Dynamic Z-altitude lift when driving on elevated highways/bridges
+ *  - Origin pivot mathematically clamped to tire ground-contact plane (bottom Y=0 -> road surface Z=0)
+ *  - Always uses exact `map.queryTerrainElevation(lngLat, { exaggerated: false }) || 0` (zero arbitrary offset)
  *  - Translucent X-Ray silhouette pass when driving underneath an overpass (underpass see-through mode)
- *  - Amber tail/status accent when operating in Dead Reckoning (自律航法中)
+ *  - Amber tail-light accent when operating in Dead Reckoning (自律航法中)
  */
 (function (root) {
   'use strict';
@@ -33,8 +34,13 @@
     let tailLightMat = null;
     let initialized = false;
 
+    /**
+     * Build the 3D sedan mesh and shift its vertical pivot so the lowest tire
+     * contact point rests strictly on local Y = 0 (road surface Z = 0).
+     */
     function buildDetailedSedanGroup(THREE, isXray) {
-      const group = new THREE.Group();
+      const rootGroup = new THREE.Group();
+      const vehicleMesh = new THREE.Group();
 
       const bodyMat = isXray
         ? new THREE.MeshBasicMaterial({
@@ -110,87 +116,72 @@
         tailLightMat = localTailMat;
       }
 
-      // Local dimensions in meters:
+      // Local dimensions in meters (pivot Y = 0 is tire ground contact plane):
       //  X = width (-0.98..+0.98)
-      //  Y = height above ground (0..1.42)
+      //  Y = height above road surface (0.00 tire bottom .. 1.42 roof)
       //  Z = length (-2.35 front .. +2.35 rear)
 
-      // 1. Contact shadow under vehicle (normal pass only)
-      if (!isXray) {
-        const shadowGeo = new THREE.PlaneGeometry(2.35, 5.15);
-        const shadowMat = new THREE.MeshBasicMaterial({
-          color: 0x000000,
-          transparent: true,
-          opacity: 0.42,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-        });
-        const shadow = new THREE.Mesh(shadowGeo, shadowMat);
-        shadow.rotation.x = -Math.PI / 2;
-        shadow.position.set(0, 0.04, 0);
-        group.add(shadow);
-      }
-
-      // 2. Lower chassis skirt / splitter
+      // 1. Lower chassis skirt / splitter
       const skirt = new THREE.Mesh(new THREE.BoxGeometry(1.94, 0.26, 4.62), chassisMat);
       skirt.position.set(0, 0.34, 0);
-      group.add(skirt);
+      vehicleMesh.add(skirt);
 
-      // 3. Main sculpted lower body hull
+      // 2. Main sculpted lower body hull
       const mainBody = new THREE.Mesh(new THREE.BoxGeometry(1.96, 0.50, 4.52), bodyMat);
       mainBody.position.set(0, 0.66, 0);
-      group.add(mainBody);
+      vehicleMesh.add(mainBody);
 
-      // 4. Tapered front nose / hood section
+      // 3. Tapered front nose / hood section
       const frontHood = new THREE.Mesh(new THREE.BoxGeometry(1.86, 0.24, 1.38), bodyMat);
       frontHood.position.set(0, 0.88, -1.50);
       frontHood.rotation.x = 0.08;
-      group.add(frontHood);
+      vehicleMesh.add(frontHood);
 
-      // 5. Rear deck / trunk lip
+      // 4. Rear deck / trunk lip
       const rearDeck = new THREE.Mesh(new THREE.BoxGeometry(1.88, 0.22, 0.96), bodyMat);
       rearDeck.position.set(0, 0.92, 1.66);
       rearDeck.rotation.x = -0.05;
-      group.add(rearDeck);
+      vehicleMesh.add(rearDeck);
 
-      // 6. Cabin greenhouse (panoramic tinted glass block)
+      // 5. Cabin greenhouse (panoramic tinted glass block)
       const cabinGlass = new THREE.Mesh(new THREE.BoxGeometry(1.56, 0.48, 2.24), glassMat);
       cabinGlass.position.set(0, 1.12, 0.08);
-      group.add(cabinGlass);
+      vehicleMesh.add(cabinGlass);
 
-      // 7. Sloped windshield wedge (front)
+      // 6. Sloped windshield wedge (front)
       const windshield = new THREE.Mesh(new THREE.BoxGeometry(1.54, 0.44, 0.78), glassMat);
       windshield.position.set(0, 1.07, -1.04);
       windshield.rotation.x = 0.44;
-      group.add(windshield);
+      vehicleMesh.add(windshield);
 
-      // 8. Sloped fastback rear glass
+      // 7. Sloped fastback rear glass
       const rearGlass = new THREE.Mesh(new THREE.BoxGeometry(1.54, 0.42, 0.82), glassMat);
       rearGlass.position.set(0, 1.08, 1.18);
       rearGlass.rotation.x = -0.40;
-      group.add(rearGlass);
+      vehicleMesh.add(rearGlass);
 
-      // 9. Metallic roof cap
+      // 8. Metallic roof cap
       const roof = new THREE.Mesh(new THREE.BoxGeometry(1.48, 0.08, 1.66), bodyMat);
       roof.position.set(0, 1.38, 0.08);
-      group.add(roof);
+      vehicleMesh.add(roof);
 
-      // 10. Side mirrors
+      // 9. Side mirrors
       const mirrorGeo = new THREE.BoxGeometry(0.24, 0.12, 0.16);
       const mirrorL = new THREE.Mesh(mirrorGeo, bodyMat);
       mirrorL.position.set(-1.05, 0.96, -0.68);
       const mirrorR = new THREE.Mesh(mirrorGeo, bodyMat);
       mirrorR.position.set(1.05, 0.96, -0.68);
-      group.add(mirrorL, mirrorR);
+      vehicleMesh.add(mirrorL, mirrorR);
 
-      // 11. Four 3D Wheels + Rims
-      const wheelGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.26, 16);
+      // 10. Four 3D Wheels + Rims (tire radius 0.34 centered at Y = 0.34 -> bottom at exact Y = 0.00)
+      const wheelRadius = 0.34;
+      const wheelGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.26, 16);
       const rimGeo = new THREE.CylinderGeometry(0.20, 0.20, 0.28, 12);
       const wheelPositions = [
-        [-0.94, 0.34, -1.42],
-        [0.94, 0.34, -1.42],
-        [-0.94, 0.34, 1.42],
-        [0.94, 0.34, 1.42],
+        [-0.94, wheelRadius, -1.42],
+        [0.94, wheelRadius, -1.42],
+        [-0.94, wheelRadius, 1.42],
+        [0.94, wheelRadius, 1.42],
       ];
       wheelPositions.forEach(([wx, wy, wz]) => {
         const tire = new THREE.Mesh(wheelGeo, wheelMat);
@@ -199,23 +190,58 @@
         const rim = new THREE.Mesh(rimGeo, rimMat);
         rim.rotation.z = Math.PI / 2;
         rim.position.set(wx, wy, wz);
-        group.add(tire, rim);
+        vehicleMesh.add(tire, rim);
       });
 
-      // 12. Dual LED Headlights (front -Z)
+      // 11. Dual LED Headlights (front -Z)
       const hlGeo = new THREE.BoxGeometry(0.44, 0.12, 0.08);
       const hlL = new THREE.Mesh(hlGeo, headlightMat);
       hlL.position.set(-0.66, 0.72, -2.28);
       const hlR = new THREE.Mesh(hlGeo, headlightMat);
       hlR.position.set(0.66, 0.72, -2.28);
-      group.add(hlL, hlR);
+      vehicleMesh.add(hlL, hlR);
 
-      // 13. Full-width LED Tail-light Bar (rear +Z — prominently visible from driver camera!)
+      // 12. Full-width LED Tail-light Bar (rear +Z)
       const tailBar = new THREE.Mesh(new THREE.BoxGeometry(1.76, 0.11, 0.08), localTailMat);
       tailBar.position.set(0, 0.79, 2.28);
-      group.add(tailBar);
+      vehicleMesh.add(tailBar);
 
-      return group;
+      // Clamp vehicleMesh pivot mathematically so tire contact bottom is strictly at Y = 0.000
+      vehicleMesh.updateMatrixWorld(true);
+      const bbox = new THREE.Box3().setFromObject(vehicleMesh);
+      if (Number.isFinite(bbox.min.y)) {
+        vehicleMesh.position.y = -bbox.min.y;
+      }
+      rootGroup.add(vehicleMesh);
+
+      // Ground contact shadow placed directly at road plane (1.5cm anti-z-fighting epsilon)
+      if (!isXray) {
+        const shadowGeo = new THREE.PlaneGeometry(2.35, 5.05);
+        const shadowMat = new THREE.MeshBasicMaterial({
+          color: 0x000000,
+          transparent: true,
+          opacity: 0.44,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        const shadow = new THREE.Mesh(shadowGeo, shadowMat);
+        shadow.rotation.x = -Math.PI / 2;
+        shadow.position.set(0, 0.015, 0);
+        rootGroup.add(shadow);
+      }
+
+      return rootGroup;
+    }
+
+    function queryExactGroundElevation(lng, lat) {
+      if (!mapRef || typeof mapRef.queryTerrainElevation !== 'function') {
+        return 0;
+      }
+      try {
+        return mapRef.queryTerrainElevation([lng, lat], { exaggerated: false }) || 0;
+      } catch (_err) {
+        return 0;
+      }
     }
 
     const customLayer = {
@@ -266,18 +292,21 @@
         if (!initialized || !root.THREE || !renderer || !scene || !camera) return;
         const THREE = root.THREE;
 
-        const merc = mapboxgl.MercatorCoordinate.fromLngLat(
-          [pose.lng, pose.lat],
-          pose.altitudeM
-        );
+        // Strictly clamp vehicle to exact terrain elevation (no arbitrary height offsets)
+        const elevation = queryExactGroundElevation(pose.lng, pose.lat);
+        pose.altitudeM = elevation;
+
+        const merc = mapboxgl.MercatorCoordinate.fromLngLat([pose.lng, pose.lat], elevation);
         const meterScale = merc.meterInMercatorCoordinateUnits();
 
-        // Keep car true-to-lane-scale at close zooms (19-20.3) and smoothly readable at highway zoom (16.8)
+        // True-to-lane-scale at close zooms (19-20.3) and smoothly readable at highway zoom (16.8)
+        // Because the vehicle pivot is tire bottom (Y=0), scaling preserves exact road contact at Z=0
         const zoom = mapRef ? mapRef.getZoom() : 19.2;
         const visualScale = zoom >= 19.0 ? 1.12 : Math.min(2.8, Math.pow(2, (19.0 - zoom) * 0.52) * 1.12);
         const s = meterScale * visualScale;
 
-        // Rotate car from local space (+X right, +Y up, -Z front) to Mercator space (+X East, -Y North, +Z Up)
+        // Map car local space (+X right, +Y up from tire bottom Y=0, -Z front)
+        // into Mercator space (+X East, -Y North, +Z Up from exact ground elevation)
         const headingRad = (pose.heading * Math.PI) / 180;
         const rotX = new THREE.Matrix4().makeRotationAxis(
           new THREE.Vector3(1, 0, 0),
@@ -346,10 +375,6 @@
           pose.heading = next.heading;
           changed = true;
         }
-        if (Number.isFinite(next.altitudeM) && next.altitudeM !== pose.altitudeM) {
-          pose.altitudeM = next.altitudeM;
-          changed = true;
-        }
         if (typeof next.isDeadReckoning === 'boolean' && next.isDeadReckoning !== pose.isDeadReckoning) {
           pose.isDeadReckoning = next.isDeadReckoning;
           changed = true;
@@ -362,11 +387,19 @@
           changed = true;
         }
         if (changed && mapRef) {
+          pose.altitudeM = queryExactGroundElevation(pose.lng, pose.lat);
           mapRef.triggerRepaint();
         }
       },
       getPose: function () {
         return { ...pose };
+      },
+      getGroundOffsetStats: function () {
+        if (!carGroup || !root.THREE) return null;
+        const THREE = root.THREE;
+        carGroup.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(carGroup);
+        return { minY: Number(box.min.y.toFixed(4)), maxY: Number(box.max.y.toFixed(4)) };
       },
     };
   }

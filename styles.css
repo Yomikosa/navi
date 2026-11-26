@@ -1,14 +1,19 @@
 /* ==========================================================================
    OEM Minimal Digital Cockpit HUD
-   Left Edge: Tesla-style Speed + Next Guidance Panel
-   Right Edge: Slim 1-Column 4-Item Dock (Clock / Mode / Menu / Recenter)
-   Top Center: Mountain Mode Initial-D Curve Icon Only
+   Left Edge: Full-Height Flat Black Capacitive Hardware Bezel (64–72px)
+   Right Map Stage:
+     - Slide-out Menu Drawer (opens directly beside left bezel)
+     - Top-Center Mountain Mode Initial-D Curve Icon Only
+     - Right Edge (Pattern B): Tesla-style Speed + Status + Next Guidance Panel
    ========================================================================== */
 
 :root {
-  --bg-void: #0b0c10;
+  --bg-void: #08080a;
+  --bezel-bg: #08080a;
+  --bezel-border: #1f1f24;
+
   --surface-glass: rgba(18, 18, 22, 0.78);
-  --surface-glass-strong: rgba(18, 18, 22, 0.92);
+  --surface-glass-strong: rgba(18, 18, 22, 0.94);
   --surface-control: rgba(255, 255, 255, 0.06);
   --surface-control-hover: rgba(255, 255, 255, 0.12);
 
@@ -34,17 +39,16 @@
 
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Noto Sans JP', 'Segoe UI', sans-serif;
 
-  --safe-left: max(12px, env(safe-area-inset-left));
-  --safe-right: max(12px, env(safe-area-inset-right));
-  --safe-top: max(12px, env(safe-area-inset-top));
-  --safe-bottom: max(12px, env(safe-area-inset-bottom));
+  --safe-right: max(16px, env(safe-area-inset-right));
+  --safe-top: max(14px, env(safe-area-inset-top));
+  --safe-bottom: max(14px, env(safe-area-inset-bottom));
 
-  --left-panel-w: clamp(210px, 26vw, 272px);
-  --right-dock-w: 68px;
+  --bezel-w: 68px;
+  --right-panel-w: clamp(210px, 26vw, 272px);
   --radius-sm: 8px;
   --radius-md: 12px;
   --blur-hud: blur(16px);
-  --shadow-hud: 0 8px 24px rgba(0, 0, 0, 0.36);
+  --shadow-hud: 0 8px 24px rgba(0, 0, 0, 0.38);
 }
 
 *,
@@ -79,13 +83,134 @@ body {
 }
 
 /* ==========================================================================
-   Full-bleed 3D Mapbox Standard Canvas
+   MAIN FLEX SPLIT: Left Fixed Black Hardware Bezel + Right Map Stage
    ========================================================================== */
 
 #cockpit-app {
   position: relative;
   width: 100vw;
   height: 100dvh;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  background: var(--bg-void);
+}
+
+/* ==========================================================================
+   LEFT EDGE: OEM Physical Capacitive Touch Bezel (Flat Black, No Radius)
+   ========================================================================== */
+
+.nav-bezel {
+  position: relative;
+  flex: 0 0 calc(var(--bezel-w) + env(safe-area-inset-left));
+  width: calc(var(--bezel-w) + env(safe-area-inset-left));
+  height: 100%;
+  padding-left: env(safe-area-inset-left);
+  padding-top: max(12px, env(safe-area-inset-top));
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  background: var(--bezel-bg);
+  border-right: 1px solid var(--bezel-border);
+  border-radius: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.bezel-clock {
+  width: 100%;
+  padding: 6px 4px 10px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: rgba(248, 250, 252, 0.92);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  pointer-events: none;
+}
+
+/* Capacitive Touch Switch: ZERO button boxes or borders — white icon floating on pure black */
+.bezel-touch-btn {
+  position: relative;
+  width: 100%;
+  flex: 1;
+  max-height: 92px;
+  margin: 0;
+  padding: 8px 4px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: rgba(255, 255, 255, 0.56);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  transition: color 0.18s ease, transform 0.12s ease;
+}
+
+.bezel-touch-btn:hover {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.bezel-touch-btn:active {
+  transform: scale(0.93);
+  color: #ffffff;
+}
+
+.bezel-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: filter 0.2s ease, color 0.18s ease;
+}
+
+.bezel-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  line-height: 1.1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Active capacitive glow: crisp illuminated white icon with soft blue-white halo */
+.bezel-touch-btn.is-lit {
+  color: #ffffff;
+}
+
+.bezel-touch-btn.is-lit .bezel-icon {
+  color: #ffffff;
+  filter: drop-shadow(0 0 8px rgba(96, 165, 250, 0.82)) drop-shadow(0 0 2px rgba(255, 255, 255, 0.65));
+}
+
+.bezel-touch-btn.is-lit .bezel-label {
+  color: rgba(226, 232, 240, 0.96);
+  text-shadow: 0 0 8px rgba(96, 165, 250, 0.55);
+}
+
+/* Subtle amber touch indicator when camera auto-follow is paused */
+.bezel-touch-btn.attention {
+  color: #fcd34d;
+}
+
+.bezel-touch-btn.attention .bezel-icon {
+  color: #fcd34d;
+  filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.78));
+}
+
+/* ==========================================================================
+   RIGHT MAP STAGE (Strictly to the right of the black bezel)
+   ========================================================================== */
+
+.map-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
   overflow: hidden;
   background: var(--bg-void);
 }
@@ -99,7 +224,7 @@ body {
 }
 
 .mapboxgl-ctrl-bottom-left {
-  left: calc(var(--safe-left) + var(--left-panel-w) + 12px) !important;
+  left: 10px !important;
   bottom: 4px !important;
   opacity: 0.5;
   transform: scale(0.84);
@@ -107,8 +232,8 @@ body {
 }
 
 .mapboxgl-ctrl-bottom-right {
+  right: 10px !important;
   bottom: 4px !important;
-  right: calc(var(--safe-right) + var(--right-dock-w) + 10px) !important;
   opacity: 0.5;
 }
 
@@ -136,15 +261,16 @@ body {
 }
 
 /* ==========================================================================
-   LEFT EDGE: Tesla-Style Unified Cockpit Panel (Speed + Status + Next Turn)
+   RIGHT EDGE (Pattern B): Tesla-Style Unified Cockpit Panel
+   (Speedometer + Status Badges + Next Turn Guidance + Route ETA)
    ========================================================================== */
 
-.tesla-left-panel {
+.tesla-panel {
   position: absolute;
   top: var(--safe-top);
-  left: var(--safe-left);
-  width: var(--left-panel-w);
-  max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom));
+  right: var(--safe-right);
+  width: var(--right-panel-w);
+  max-height: calc(100% - var(--safe-top) - var(--safe-bottom));
   z-index: 20;
   padding: 14px 15px;
   display: flex;
@@ -465,86 +591,15 @@ body {
 }
 
 /* ==========================================================================
-   RIGHT EDGE: Slim 1-Column Vertical Dock (STRICTLY 4 ITEMS)
-   1. Clock (non-button)  2. Mode Cycle  3. Menu  4. Recenter Ego
-   ========================================================================== */
-
-.right-slim-dock {
-  position: absolute;
-  top: var(--safe-top);
-  right: var(--safe-right);
-  width: var(--right-dock-w);
-  z-index: 25;
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-}
-
-.dock-clock {
-  padding: 8px 4px;
-  text-align: center;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-primary);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
-  margin-bottom: 2px;
-}
-
-.dock-btn {
-  width: 100%;
-  min-height: 54px;
-  padding: 6px 4px;
-  border-radius: 9px;
-  border: 1px solid transparent;
-  background: var(--surface-control);
-  color: var(--text-secondary);
-  font-family: var(--font-sans);
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
-}
-
-.dock-btn:hover {
-  background: var(--surface-control-hover);
-  color: var(--text-primary);
-}
-
-.dock-btn.active {
-  background: var(--accent-blue-deep);
-  color: #ffffff;
-}
-
-.dock-btn.attention {
-  background: rgba(245, 158, 11, 0.22);
-  border-color: rgba(245, 158, 11, 0.45);
-  color: #fcd34d;
-}
-
-.dock-btn-label {
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.1;
-  white-space: nowrap;
-}
-
-/* ==========================================================================
-   HIDDEN SLIDE-OUT MENU DRAWER (Search + Demo + Underpass + Settings)
+   SLIDE-OUT MENU DRAWER (Slides out cleanly from right edge of Left Bezel)
    ========================================================================== */
 
 .menu-drawer {
   position: absolute;
   top: var(--safe-top);
   bottom: var(--safe-bottom);
-  right: calc(var(--safe-right) + var(--right-dock-w) + 10px);
-  width: min(330px, calc(100vw - var(--left-panel-w) - var(--right-dock-w) - 42px));
+  left: 12px;
+  width: min(332px, calc(100% - var(--right-panel-w) - var(--safe-right) - 24px));
   z-index: 35;
   padding: 14px;
   display: flex;
@@ -552,13 +607,13 @@ body {
   gap: 10px;
   background: var(--surface-glass-strong);
   overflow-y: auto;
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition: opacity 0.2s ease, transform 0.22s ease;
 }
 
 .menu-drawer.collapsed {
   opacity: 0;
   pointer-events: none;
-  transform: translateX(14px);
+  transform: translateX(-18px);
 }
 
 .menu-drawer::-webkit-scrollbar {
@@ -949,12 +1004,12 @@ body {
   bottom: calc(var(--safe-bottom) + 6px);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 40;
+  z-index: 42;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  max-width: min(420px, calc(100vw - var(--left-panel-w) - var(--right-dock-w) - 36px));
+  max-width: min(420px, calc(100% - var(--right-panel-w) - 40px));
   pointer-events: none;
 }
 
@@ -1164,7 +1219,7 @@ body {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(11, 12, 16, 0.94);
+  background: rgba(8, 8, 10, 0.94);
   backdrop-filter: blur(14px);
   padding: 24px;
   flex-direction: column;
@@ -1214,11 +1269,23 @@ body {
 
 @media (max-height: 450px) {
   :root {
-    --left-panel-w: clamp(196px, 25vw, 236px);
-    --right-dock-w: 62px;
+    --bezel-w: 64px;
+    --right-panel-w: clamp(196px, 25vw, 236px);
+    --safe-top: max(10px, env(safe-area-inset-top));
+    --safe-bottom: max(10px, env(safe-area-inset-bottom));
+    --safe-right: max(12px, env(safe-area-inset-right));
   }
 
-  .tesla-left-panel {
+  .bezel-clock {
+    font-size: 13px;
+    padding: 4px 2px 8px;
+  }
+
+  .bezel-label {
+    font-size: 8.5px;
+  }
+
+  .tesla-panel {
     padding: 10px 12px;
     gap: 8px;
   }
@@ -1230,16 +1297,6 @@ body {
   .maneuver-icon-box {
     width: 36px;
     height: 36px;
-  }
-
-  .dock-clock {
-    padding: 5px 2px;
-    font-size: 12.5px;
-  }
-
-  .dock-btn {
-    min-height: 46px;
-    padding: 4px 2px;
   }
 
   .initiald-curve-card {

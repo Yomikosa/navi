@@ -67,7 +67,7 @@ const APP_CONFIG = {
       closeZoom: 19.5,
       closePitch: 78,
       enableTerrain: true,
-      terrainExaggeration: 1.5,
+      terrainExaggeration: 1.0,
       // 山モード ペースノート前方解析レンジ (100m〜250m)
       lookaheadMinMeters: 100,
       lookaheadMaxMeters: 250,
