@@ -395,60 +395,170 @@
   }
 
   /**
-   * Hysteresis state transition for Highway Mode JCT/IC 1.0km auto 3D zoom.
+   * Determine whether a step is an actionable City intersection turn maneuver.
    */
-  function evaluateHighwayJctZoom(navProgress, currentlyActive, cfg) {
-    const triggerM = (cfg && cfg.jctTriggerMeters) || 1000;
-    const releaseM = (cfg && cfg.jctReleaseMeters) || 1180;
-    const passClearM = (cfg && cfg.jctPassClearMeters) || -45;
-
-    if (!navProgress || !navProgress.nextBranch) {
-      return { active: false, branch: null, distMeters: Infinity };
-    }
-
-    const signedDist = navProgress.signedDistToBranchMeters;
-    const distM = Math.max(0, signedDist);
-
-    if (!currentlyActive) {
-      const shouldActivate = signedDist <= triggerM && signedDist > passClearM;
-      return {
-        active: shouldActivate,
-        branch: navProgress.nextBranch,
-        distMeters: distM,
-      };
-    } else {
-      // Stay active while passing through junction until passed or next branch is > releaseM away
-      const shouldStayActive = signedDist <= releaseM && signedDist > passClearM;
-      return {
-        active: shouldStayActive,
-        branch: navProgress.nextBranch,
-        distMeters: distM,
-      };
-    }
+  function isCityTurnStep(step) {
+    if (!step || !step.maneuver) return false;
+    const type = (step.maneuver.type || '').toLowerCase();
+    const mod = (step.maneuver.modifier || '').toLowerCase();
+    if (type === 'depart') return false;
+    const turnTypes = new Set([
+      'turn',
+      'end of road',
+      'fork',
+      'off ramp',
+      'on ramp',
+      'merge',
+      'roundabout',
+      'rotary',
+      'exit roundabout',
+      'exit rotary',
+      'arrive',
+    ]);
+    if (turnTypes.has(type)) return true;
+    return Boolean(mod && mod !== 'straight');
   }
 
   /**
-   * Speed-adaptive cruise zoom for Highway Mode (14.0–15.0) and City Mode (17.0–18.0).
+   * Per-frame proximity auto-3D zoom evaluator using direct `turf.distance`
+   * against every upcoming `routes[0].legs[0].steps[i].maneuver.location`.
+   *
+   * - City Mode: triggers <= 150m before intersection turn -> zoom 20.3, pitch 80
+   * - Highway Mode: triggers <= 800m before JCT/IC/branch -> zoom 19.5, pitch 78
+   * - Releases cleanly once passed (~30m City / ~45m Highway past maneuver).
    */
-  function computeSpeedAdaptiveZoom(modeId, speedKmh, isJctZoomActive) {
+  function evaluateManeuverProximityZoom(
+    routeModel,
+    currentCoords,
+    currentDistKm,
+    modeId,
+    currentlyActive,
+    modeCfg,
+    isSnappedToRoute = true
+  ) {
+    if (
+      !routeModel ||
+      !Array.isArray(routeModel.steps) ||
+      routeModel.steps.length < 2 ||
+      !Array.isArray(currentCoords) ||
+      !modeCfg ||
+      !modeCfg.closeZoomTriggerMeters
+    ) {
+      return {
+        active: false,
+        step: null,
+        directDistMeters: Infinity,
+        routeSignedMeters: Infinity,
+        thresholdMeters: 0,
+      };
+    }
+
+    const triggerM = modeCfg.closeZoomTriggerMeters;
+    const releaseM = modeCfg.closeZoomReleaseMeters || triggerM * 1.15;
+    const passClearM = modeCfg.closeZoomPassClearMeters || -35;
+    const egoPt = turf.point(currentCoords);
+
+    // Filter candidate steps from routes[0].legs[0].steps (skipping index 0 'depart')
+    let candidates = [];
+    for (let i = 1; i < routeModel.steps.length; i++) {
+      const step = routeModel.steps[i];
+      if (!step.maneuver || !Array.isArray(step.maneuver.location)) continue;
+
+      const routeSignedMeters = (step.routeDistKm - currentDistKm) * 1000;
+      // Skip maneuvers already passed when snapped to route
+      if (isSnappedToRoute && routeSignedMeters <= passClearM) continue;
+
+      const qualifies =
+        modeId === 'highway' ? step.isHighwayBranch : isCityTurnStep(step);
+      if (!qualifies) continue;
+
+      const directDistMeters = turf.distance(
+        egoPt,
+        turf.point(step.maneuver.location),
+        { units: 'meters' }
+      );
+      candidates.push({ step, directDistMeters, routeSignedMeters });
+    }
+
+    // Highway fallback: if route has no highway-tagged steps, use next turn/arrive step
+    if (modeId === 'highway' && candidates.length === 0) {
+      for (let i = 1; i < routeModel.steps.length; i++) {
+        const step = routeModel.steps[i];
+        if (!step.maneuver || !Array.isArray(step.maneuver.location)) continue;
+        const routeSignedMeters = (step.routeDistKm - currentDistKm) * 1000;
+        if (isSnappedToRoute && routeSignedMeters <= passClearM) continue;
+        if (!isCityTurnStep(step)) continue;
+
+        const directDistMeters = turf.distance(
+          egoPt,
+          turf.point(step.maneuver.location),
+          { units: 'meters' }
+        );
+        candidates.push({ step, directDistMeters, routeSignedMeters });
+      }
+    }
+
+    if (candidates.length === 0) {
+      return {
+        active: false,
+        step: null,
+        directDistMeters: Infinity,
+        routeSignedMeters: Infinity,
+        thresholdMeters: triggerM,
+      };
+    }
+
+    // Pick the immediate upcoming maneuver (by route order if snapped, else closest direct distance)
+    candidates.sort((a, b) =>
+      isSnappedToRoute
+        ? a.step.routeDistKm - b.step.routeDistKm
+        : a.directDistMeters - b.directDistMeters
+    );
+    const nearest = candidates[0];
+
+    // Use direct turf.distance for deterministic proximity triggering
+    const effectiveDistM = nearest.directDistMeters;
+    const isActive = currentlyActive
+      ? effectiveDistM <= releaseM
+      : effectiveDistM <= triggerM;
+
+    return {
+      active: isActive,
+      step: nearest.step,
+      directDistMeters: nearest.directDistMeters,
+      routeSignedMeters: nearest.routeSignedMeters,
+      thresholdMeters: triggerM,
+    };
+  }
+
+  /**
+   * Close-range dashcam/bumper camera zoom & pitch profiles:
+   * - City:     normal 19.2 / 75°, intersection <=150m -> 20.3 / 80°
+   * - Highway:  cruise 16.8 / 68° (subtle speed nuance), JCT <=800m -> 19.5 / 78°
+   * - Mountain: normal 18.2 / 72°
+   */
+  function computeSpeedAdaptiveZoom(modeId, speedKmh, isCloseZoomActive) {
     const v = clamp(Number.isFinite(speedKmh) ? speedKmh : 0, 0, 180);
 
-    if (modeId === 'highway') {
-      if (isJctZoomActive) return 17.5;
-      // 0–50 km/h -> 15.0, 50–140 km/h -> smoothly eases 15.0 down to 14.0
-      const t = clamp((v - 40) / 100, 0, 1);
-      return Number((15.0 - t * 1.0).toFixed(3));
-    }
-
     if (modeId === 'city') {
-      // 0–60 km/h -> smoothly eases 17.9 down to 17.1 (strictly within 17–18)
-      const t = clamp(v / 65, 0, 1);
-      return Number((17.9 - t * 0.8).toFixed(3));
+      return isCloseZoomActive ? 20.3 : 19.2;
     }
 
-    // mountain mode: slightly wider view at higher speeds
-    const t = clamp((v - 25) / 80, 0, 1);
-    return Number((16.2 - t * 0.6).toFixed(3));
+    if (modeId === 'highway') {
+      if (isCloseZoomActive) return 19.5;
+      // Centered cleanly at 16.8 (~85 km/h) with subtle speed adaptation [16.65 .. 16.95]
+      const t = clamp((v - 40) / 100, 0, 1);
+      return Number((16.95 - t * 0.3).toFixed(3));
+    }
+
+    // Mountain mode
+    return isCloseZoomActive ? 19.5 : 18.2;
+  }
+
+  function computeTargetPitch(modeId, isCloseZoomActive) {
+    if (modeId === 'city') return isCloseZoomActive ? 80 : 75;
+    if (modeId === 'highway') return isCloseZoomActive ? 78 : 68;
+    return isCloseZoomActive ? 78 : 72;
   }
 
   /**
@@ -737,13 +847,15 @@
     formatDurationJa,
     bearingToCompass,
     isHighwayBranchStep,
+    isCityTurnStep,
     getManeuverKey,
     buildRouteModel,
     getRouteHeadingAt,
     snapToRoute,
     getNavigationProgress,
-    evaluateHighwayJctZoom,
+    evaluateManeuverProximityZoom,
     computeSpeedAdaptiveZoom,
+    computeTargetPitch,
     analyzeMountainPaceNote,
     advanceDeadReckoning,
     sliceRouteProgress,

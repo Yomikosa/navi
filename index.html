@@ -3,20 +3,20 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#04070d" />
+  <meta name="theme-color" content="#0b0c10" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="description" content="Mapbox GL JS v3 と Turf.js を用いた最新自動運転コックピット風3DカーナビゲーションHUDアプリ。市街地3Dビル、高速JCT自動3Dズーム、山岳ペースノート、トンネル自律航法対応。" />
-  <title>AERO-DRIVE | 3D Digital Cockpit HUD Navigation</title>
+  <meta name="description" content="Mapbox GL JS v3 Standard Style と Turf.js による純正車載コックピット風 3D カーナビゲーションアプリ。立体交差・車線3D表示、交差点/JCT自動ズーム、山岳ペースノート、トンネル自律航法対応。" />
+  <title>AERO-DRIVE | 3D Cockpit Navigation</title>
 
   <link rel="manifest" href="./manifest.json" />
   <link rel="icon" type="image/svg+xml" href="./icons/icon.svg" />
 
-  <!-- Typography: Orbitron (Digital Speed) + JetBrains Mono (Telemetry) + Noto Sans JP -->
+  <!-- Clean Sans-Serif Typography: Inter + Noto Sans JP -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Noto+Sans+JP:wght@400;500;700;800&family=Orbitron:wght@700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
   <!-- Mapbox GL JS v3 -->
   <link href="https://api.mapbox.com/mapbox-gl-js/v3.35.0/mapbox-gl.css" rel="stylesheet" />
@@ -28,58 +28,38 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <main id="cockpit-app" aria-label="3D デジタルコックピット ナビゲーション">
-    <!-- Fullscreen 3D Heading-Up Map -->
+  <main id="cockpit-app" aria-label="3D 車載デジタルコックピット ナビゲーション">
+    <!-- Fullscreen 3D Heading-Up Mapbox Standard View -->
     <div id="map" role="application" aria-label="3D ナビゲーションマップ"></div>
     <div class="hud-scrim" aria-hidden="true"></div>
-    <div class="tunnel-vignette" aria-hidden="true"></div>
 
     <!-- ================================================================
-         LEFT INSTRUMENT CLUSTER: Digital Speedometer + GPS + Destination
+         LEFT INSTRUMENT CLUSTER: Minimal Digital Speedometer + GPS + Dest
          ================================================================ -->
     <aside class="left-cluster" aria-label="計器クラスター">
-      <!-- Speedometer & Telemetry Card -->
       <section class="hud-panel speed-card" aria-label="スピードメーター">
         <div class="speed-header-row">
-          <h1 class="cockpit-brand" style="margin:0; font-size:10px;">AERO-DRIVE HUD</h1>
-          <span id="demo-active-chip" class="demo-chip hidden">DEMO SIM</span>
+          <h1 class="cockpit-brand">Drive Cockpit</h1>
+          <span id="demo-active-chip" class="demo-chip hidden">DEMO</span>
         </div>
 
-        <div class="speed-gauge-wrap">
-          <svg class="speed-gauge-svg" viewBox="0 0 200 148" aria-hidden="true">
-            <defs>
-              <linearGradient id="speedArcGrad" x1="0%" y1="100%" x2="100%" y2="0%">
-                <stop offset="0%" stop-color="#0094d4" />
-                <stop offset="55%" stop-color="#00e5ff" />
-                <stop offset="100%" stop-color="#a8f8ff" />
-              </linearGradient>
-            </defs>
-            <!-- 240° sweep arc (center 100,102, r=78, length=326.73) -->
-            <path class="gauge-track" d="M 32.45 141 A 78 78 0 1 1 167.55 141" />
-            <path class="gauge-ticks" d="M 41.97 135.5 A 67 67 0 1 1 158.03 135.5" />
-            <path
-              id="speed-arc-progress"
-              class="gauge-progress"
-              d="M 32.45 141 A 78 78 0 1 1 167.55 141"
-              stroke-dasharray="326.73"
-              stroke-dashoffset="326.73"
-            />
-          </svg>
+        <div class="speed-main-display">
+          <div id="speed-value" class="speed-value tabular-nums">0</div>
+          <div class="speed-unit">km/h</div>
+        </div>
 
-          <div class="speed-readout">
-            <div id="speed-value" class="speed-value">0</div>
-            <div class="speed-unit">km/h</div>
-          </div>
+        <div class="speed-bar-track" aria-hidden="true">
+          <div id="speed-bar-fill" class="speed-bar-fill"></div>
         </div>
 
         <div class="telemetry-strip">
           <div class="telemetry-cell">
-            <span class="telemetry-label">HEADING</span>
-            <span id="heading-val" class="telemetry-val">035° NE</span>
+            <span class="telemetry-label">方位</span>
+            <span id="heading-val" class="telemetry-val tabular-nums">035° NE</span>
           </div>
           <div class="telemetry-cell">
-            <span class="telemetry-label">ALT / MODE</span>
-            <span id="alt-mode-val" class="telemetry-val">CITY · --m</span>
+            <span class="telemetry-label">モード / 標高</span>
+            <span id="alt-mode-val" class="telemetry-val tabular-nums">CITY · --m</span>
           </div>
         </div>
       </section>
@@ -88,7 +68,7 @@
       <section id="gps-status-card" class="hud-panel gps-status-card status-acquiring" aria-live="polite">
         <span class="gps-dot" aria-hidden="true"></span>
         <div class="gps-info">
-          <div id="gps-primary-label" class="gps-primary">GPS ACQUIRING</div>
+          <div id="gps-primary-label" class="gps-primary">GPS STANDBY</div>
           <div id="gps-secondary-label" class="gps-secondary">衛星測位を待機中...</div>
         </div>
       </section>
@@ -102,7 +82,7 @@
         aria-controls="search-drawer"
       >
         <span class="dest-trigger-icon" aria-hidden="true">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="7" />
             <path d="m20 20-3.5-3.5" />
           </svg>
@@ -111,26 +91,26 @@
           <span id="dest-trigger-title" class="dest-trigger-title">目的地を検索 / タップ設定</span>
           <span id="dest-trigger-meta" class="dest-trigger-meta">ルート未設定 · 長押し対応</span>
         </span>
-        <svg class="dest-chevron" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <svg class="dest-chevron" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="m9 18 6-6-6-6" />
         </svg>
       </button>
     </aside>
 
     <!-- ================================================================
-         EXPANDABLE DESTINATION SEARCH DRAWER (Auto-collapses while driving)
+         EXPANDABLE DESTINATION SEARCH DRAWER
          ================================================================ -->
     <section id="search-drawer" class="hud-panel search-drawer collapsed" aria-label="目的地検索パネル">
       <div class="drawer-head">
         <div class="drawer-title">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#00e5ff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 22s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12Z" />
             <circle cx="12" cy="10" r="2.5" />
           </svg>
           <span>目的地・ルート設定</span>
         </div>
         <button id="btn-search-close" type="button" class="icon-btn" aria-label="検索パネルを折りたたむ">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
             <path d="M18 6 6 18M6 6l12 12" />
           </svg>
         </button>
@@ -149,7 +129,7 @@
 
       <div class="search-actions-row">
         <button id="btn-map-pin-mode" type="button" class="btn-ghost">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3" />
             <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
           </svg>
@@ -162,67 +142,67 @@
 
       <div class="search-scroll">
         <div id="search-results-section" class="hidden">
-          <div class="section-caption">SEARCH RESULTS</div>
-          <div id="search-results-list" class="search-results-list" style="margin-top:5px;"></div>
+          <div class="section-caption">検索候補</div>
+          <div id="search-results-list" class="search-results-list" style="margin-top:6px;"></div>
         </div>
 
         <div>
-          <div class="section-caption">QUICK TEST ROUTES (実APIルート取得)</div>
-          <div id="preset-list" class="preset-list" style="margin-top:5px;"></div>
+          <div class="section-caption">テストコース（実ルート取得）</div>
+          <div id="preset-list" class="preset-list" style="margin-top:6px;"></div>
         </div>
 
         <div class="map-hint-note">
-          ヒント：マップ上の任意の地点を<strong>長押し（0.45秒）</strong>、または上の「マップタップ設定」をONにしてタップすることでも目的地を設定できます。
+          マップ上の任意の地点を<strong>長押し（0.45秒）</strong>、または「マップタップ設定」をONにしてタップすると目的地を設定できます。
         </div>
       </div>
     </section>
 
     <!-- ================================================================
-         TOP-CENTER MODE-ADAPTIVE GUIDANCE ZONE
+         TOP-CENTER GUIDANCE BANNER
          ================================================================ -->
     <section class="top-guidance-zone" aria-label="ナビゲーション案内">
-      <!-- City Turn Guidance & Highway IC/JCT Countdown Banner -->
+      <!-- City Turn-by-Turn & Highway IC/JCT Countdown Banner -->
       <div id="guidance-banner" class="hud-panel guidance-banner hidden">
         <div id="maneuver-icon-box" class="maneuver-icon-box" aria-hidden="true"></div>
         <div class="guidance-body">
           <div class="guidance-top-line">
-            <span id="guidance-distance" class="guidance-distance">-- m</span>
-            <span id="guidance-tag" class="guidance-tag">NEXT TURN</span>
-            <span id="jct-zoom-badge" class="jct-badge hidden">3D JCT ZOOM</span>
+            <span id="guidance-distance" class="guidance-distance tabular-nums">-- m</span>
+            <span id="guidance-tag" class="guidance-tag">NEXT</span>
+            <span id="jct-zoom-badge" class="jct-badge hidden">3D ZOOM</span>
           </div>
           <div id="guidance-instruction" class="guidance-instruction">目的地を設定するとルート案内を開始します</div>
           <div id="guidance-sub" class="guidance-sub"></div>
         </div>
       </div>
 
-      <!-- Mountain Mode Real-Route Rally Pace Note Auto-Popup -->
+      <!-- Mountain Mode Real-Route Rally Pace Note Popup -->
       <div id="pace-note-banner" class="hud-panel pace-note-banner hidden" role="alert">
         <div id="pace-icon-box" class="pace-icon-box" aria-hidden="true"></div>
         <div class="pace-text-wrap">
           <div class="pace-header-row">
             <span id="pace-grade-pill" class="pace-grade-pill">R3</span>
-            <span id="pace-kicker" class="pace-kicker">PACE NOTE · FORWARD CURVATURE</span>
+            <span id="pace-kicker" class="pace-kicker">前方曲率ペースノート</span>
           </div>
           <div id="pace-headline" class="pace-headline">150m先 右急カーブ（R3）</div>
           <div id="pace-subline" class="pace-subline">曲角 52° · 推定曲率半径 R≈68m</div>
         </div>
       </div>
 
-      <!-- Mountain Mode Calm Status Pill (when straight road ahead) -->
+      <!-- Mountain Mode Calm Status Pill -->
       <div id="mountain-clear-pill" class="hud-panel mountain-clear-pill hidden">
-        <span>3D TERRAIN ACTIVE</span>
+        <span>3D 地形</span>
         <span>·</span>
-        <strong id="mountain-status-text">前方300m クリア（緩やか）</strong>
+        <strong id="mountain-status-text">前方300m 緩やか</strong>
       </div>
     </section>
 
     <!-- ================================================================
-         RIGHT SIDE CONTROLS: Utility Bar & 3-Mode Selector
+         RIGHT CONTROLS: Utility Bar & 3-Mode Selector
          ================================================================ -->
     <aside class="right-hud" aria-label="走行モードとコックピット操作">
       <div class="hud-panel utility-bar">
         <button id="btn-wakelock" type="button" class="util-btn" title="Screen Wake Lock (画面スリープ防止)">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="4" />
             <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
           </svg>
@@ -230,20 +210,20 @@
         </button>
 
         <button id="btn-recenter" type="button" class="util-btn active" title="自車追従カメラ ON/OFF">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="12 2 19 21 12 17 5 21 12 2" />
           </svg>
           <span class="util-label-hide-sm">追従</span>
         </button>
 
         <button id="btn-fullscreen" type="button" class="util-btn" title="フルスクリーン＆横向きロック">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3" />
           </svg>
         </button>
 
         <button id="btn-token-settings" type="button" class="util-btn" title="Mapbox アクセストークン設定">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="7.5" cy="15.5" r="4.5" />
             <path d="m21 2-9.6 9.6M15.5 7.5 18 10" />
           </svg>
@@ -251,7 +231,7 @@
         </button>
 
         <button id="btn-debug-toggle" type="button" class="util-btn" title="デバッグ・シミュレーションパネル開閉">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 20V10M18 20V4M6 20v-4" />
           </svg>
           <span>SIM</span>
@@ -261,32 +241,32 @@
       <!-- 3-Mode Selector Rail -->
       <nav class="hud-panel mode-switcher" aria-label="走行モード切替">
         <button type="button" class="mode-btn active" data-mode="city" id="mode-btn-city">
-          <svg class="mode-btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg class="mode-btn-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
             <path d="M3 21h18M5 21V7l6-4v18M13 21V11l6-3v13M8 10h.01M8 14h.01M16 14h.01M16 17h.01" />
           </svg>
           <span class="mode-btn-labels">
             <span class="mode-btn-ja">市街地</span>
-            <span class="mode-btn-en">CITY 3D</span>
+            <span class="mode-btn-en">City</span>
           </span>
         </button>
 
         <button type="button" class="mode-btn" data-mode="highway" id="mode-btn-highway">
-          <svg class="mode-btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg class="mode-btn-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
             <path d="M6 21 9 3M18 21 15 3M12 6v3M12 13v3M12 19v2" />
           </svg>
           <span class="mode-btn-labels">
             <span class="mode-btn-ja">高速道路</span>
-            <span class="mode-btn-en">HIGHWAY</span>
+            <span class="mode-btn-en">Highway</span>
           </span>
         </button>
 
         <button type="button" class="mode-btn" data-mode="mountain" id="mode-btn-mountain">
-          <svg class="mode-btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg class="mode-btn-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
             <path d="m3 20 7-13 4 7 3-5 4 11H3Z" />
           </svg>
           <span class="mode-btn-labels">
             <span class="mode-btn-ja">山</span>
-            <span class="mode-btn-en">WINDING</span>
+            <span class="mode-btn-en">Mountain</span>
           </span>
         </button>
       </nav>
@@ -298,13 +278,13 @@
     <aside id="debug-drawer" class="hud-panel debug-drawer collapsed" aria-label="テスト・シミュレーションパネル">
       <div class="drawer-head">
         <div class="drawer-title">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#00e5ff" stroke-width="2.2">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2.1">
             <polygon points="5 3 19 12 5 21 5 3" />
           </svg>
-          <span>SIMULATOR / DEBUG</span>
+          <span>シミュレーション / デバッグ</span>
         </div>
         <button id="btn-debug-close" type="button" class="icon-btn" aria-label="デバッグパネルを閉じる">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
             <path d="M18 6 6 18M6 6l12 12" />
           </svg>
         </button>
@@ -349,7 +329,22 @@
         </button>
       </div>
 
-      <!-- 2. Tunnel / GPS Lost Simulation Toggle -->
+      <!-- 2. Force Close-Up Intersection / JCT 3D Camera Verification Button -->
+      <div class="control-group">
+        <div class="toggle-label-wrap">
+          <div class="toggle-title">交差点 / JCT 至近距離カメラ確認</div>
+          <div class="toggle-desc">市街地(20.3 / 80°)・高速(19.5 / 78°)へ強制切替</div>
+        </div>
+        <button id="btn-force-close-zoom" type="button" class="btn-ghost" style="width:100%;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="7" />
+            <path d="m20 20-3.5-3.5M11 8v6M8 11h6" />
+          </svg>
+          <span id="force-close-zoom-label">至近距離カメラを強制 ON</span>
+        </button>
+      </div>
+
+      <!-- 3. Tunnel / GPS Lost Simulation Toggle -->
       <div class="control-group">
         <div class="toggle-row">
           <div class="toggle-label-wrap">
@@ -365,20 +360,20 @@
 
       <!-- Quick Course Switcher inside Debug Drawer -->
       <div class="control-group">
-        <div class="section-caption">ONE-TAP DEMO COURSES</div>
+        <div class="section-caption">テストコース切替</div>
         <div id="debug-preset-list" class="preset-list"></div>
       </div>
 
       <!-- Live Telemetry -->
       <div class="control-group">
-        <div class="section-caption">LIVE TELEMETRY</div>
+        <div class="section-caption">テレメトリ</div>
         <div class="debug-telemetry-grid">
           <div class="debug-kv"><span>ZOOM</span><span id="dbg-zoom">--</span></div>
           <div class="debug-kv"><span>PITCH</span><span id="dbg-pitch">--</span></div>
-          <div class="debug-kv"><span>PROG</span><span id="dbg-progress">--</span></div>
+          <div class="debug-kv"><span>AUTO ZOOM</span><span id="dbg-auto-zoom">OFF</span></div>
           <div class="debug-kv"><span>DR MODE</span><span id="dbg-dr-mode">OFF</span></div>
-          <div class="debug-kv"><span>BRANCH</span><span id="dbg-branch">--</span></div>
-          <div class="debug-kv"><span>CURVE</span><span id="dbg-curve">--</span></div>
+          <div class="debug-kv"><span>分岐距離</span><span id="dbg-branch">--</span></div>
+          <div class="debug-kv"><span>カーブ</span><span id="dbg-curve">--</span></div>
         </div>
       </div>
     </aside>
@@ -394,7 +389,7 @@
         </div>
         <button id="btn-pin-route" type="button" class="btn-primary">ルート案内</button>
         <button id="btn-pin-cancel" type="button" class="icon-btn" aria-label="キャンセル">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
             <path d="M18 6 6 18M6 6l12 12" />
           </svg>
         </button>
@@ -408,12 +403,12 @@
        ================================================================ -->
   <div id="token-modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="token-modal-title">
     <div class="token-modal">
-      <div class="modal-kicker">AERO-DRIVE 3D COCKPIT SETUP</div>
+      <div class="modal-kicker">Mapbox Setup</div>
       <h2 id="token-modal-title" class="modal-title">Mapbox アクセストークンを入力</h2>
       <p class="modal-desc">
-        Mapbox GL JS v3（3D建物・3D地形・Directions・Search API）を起動するため、パブリックトークン（<code>pk.ey...</code>）を入力してください。トークンはこの端末のブラウザ（<code>localStorage</code>）にのみ保存されます。<br />
-        ソースコード固定の場合は <code>js/config.js</code> 先頭の <code>MAPBOX_ACCESS_TOKEN</code> に直接記述できます。
-        （トークン取得: <a href="https://account.mapbox.com/access-tokens/" target="_blank" rel="noopener noreferrer">Mapbox Account</a>）
+        Mapbox GL JS v3（Standard 3D スタイル・3D 地形・Directions・Search API）を起動するため、パブリックトークン（<code>pk.ey...</code>）を入力してください。トークンはこの端末のブラウザ（<code>localStorage</code>）にのみ保存されます。<br />
+        ソースコード固定の場合は <code>js/config.js</code> 先頭の <code>MAPBOX_ACCESS_TOKEN</code> に記述できます。
+        （<a href="https://account.mapbox.com/access-tokens/" target="_blank" rel="noopener noreferrer">Mapbox Account</a>）
       </p>
 
       <div class="token-input-group">
@@ -432,7 +427,7 @@
       <div class="modal-actions">
         <button id="btn-token-clear" type="button" class="btn-ghost btn-danger hidden">保存を削除</button>
         <button id="btn-token-cancel" type="button" class="btn-ghost hidden">キャンセル</button>
-        <button id="btn-token-save" type="button" class="btn-primary">コックピットを起動</button>
+        <button id="btn-token-save" type="button" class="btn-primary">起動する</button>
       </div>
     </div>
   </div>
@@ -446,7 +441,7 @@
       <path d="M12 18h.01" />
     </svg>
     <h2>横向き（ランドスケープ）での利用を推奨します</h2>
-    <p>デジタルコックピットHUDはスマートフォン横画面に最適化されています。端末を横に回転させてご使用ください。</p>
+    <p>車載コックピット表示はスマートフォン横画面に最適化されています。端末を横に回転させてご使用ください。</p>
     <button id="btn-allow-portrait" type="button" class="btn-ghost">このまま縦画面で表示</button>
   </div>
 
