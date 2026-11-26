@@ -3,9 +3,9 @@
  * MAPBOX ACCESS TOKEN 設定
  * ----------------------------------------------------------------------------
  * コードに直接設定する場合は、下の MAPBOX_ACCESS_TOKEN に
- * Mapbox のパブリックアクセストークン (pk.ey...) を入力してください。
+ * Mapbox のパブリックアクセストークン (pk.eyJ...) を入力してください。
  * 空欄のままデプロイした場合でも、アプリ起動時のトークン入力画面（localStorage保存）
- * または URL パラメータ (?token=pk.ey...) から即座に設定して利用できます。
+ * または URL パラメータ (?token=pk.eyJ...) から即座に設定して利用できます。
  * ============================================================================
  */
 const MAPBOX_ACCESS_TOKEN = '';
@@ -33,7 +33,7 @@ const APP_CONFIG = {
       pitch: 75,
       // 交差点の右左折 150m 手前〜通過まで自動至近距離ズーム
       closeZoomTriggerMeters: 150,
-      closeZoomReleaseMeters: 190,
+      closeZoomReleaseMeters: 185,
       closeZoomPassClearMeters: -30,
       closeZoom: 20.3,
       closePitch: 80,
@@ -48,7 +48,7 @@ const APP_CONFIG = {
       pitch: 68,
       // JCT・IC・分岐 800m 手前〜通過まで自動至近距離ズーム
       closeZoomTriggerMeters: 800,
-      closeZoomReleaseMeters: 920,
+      closeZoomReleaseMeters: 900,
       closeZoomPassClearMeters: -45,
       closeZoom: 19.5,
       closePitch: 78,
@@ -68,9 +68,9 @@ const APP_CONFIG = {
       closePitch: 78,
       enableTerrain: true,
       terrainExaggeration: 1.5,
-      // ペースノート前方解析レンジ (m)
+      // 山モード ペースノート前方解析レンジ (100m〜250m)
       lookaheadMinMeters: 100,
-      lookaheadMaxMeters: 300,
+      lookaheadMaxMeters: 250,
     },
   },
 
@@ -109,7 +109,7 @@ const APP_CONFIG = {
       mode: 'mountain',
       badge: '山岳',
       name: '箱根ターンパイク → 大観山',
-      desc: '3D地形・実ルート連動ペースノート確認',
+      desc: '3D地形・前方100〜250mペースノート確認',
       origin: [139.1367, 35.2374],
       destination: [139.0488, 35.1842],
       defaultSpeedKmh: 65,
@@ -117,7 +117,6 @@ const APP_CONFIG = {
   ],
 };
 
-// ブラウザグローバルおよび Node.js テスト環境互換エクスポート
 if (typeof window !== 'undefined') {
   window.MAPBOX_ACCESS_TOKEN = MAPBOX_ACCESS_TOKEN;
   window.APP_CONFIG = APP_CONFIG;

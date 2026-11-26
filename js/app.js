@@ -1,6 +1,6 @@
 /**
- * AERO-DRIVE 3D Digital Cockpit — Main Application Controller
- * Powered by Mapbox GL JS v3 (Standard Style) + Directions / Search Box / Geocoding APIs + Turf.js
+ * AERO-DRIVE 3D Digital Cockpit — Refactored Application Controller
+ * Mapbox GL JS v3 (Standard Style) + Geocoding & Directions API + Turf.js v6
  */
 (function () {
   'use strict';
@@ -25,7 +25,7 @@
     closeZoomStep: null,
     lastManeuverDirectDistM: Infinity,
 
-    // Camera tracking
+    // Camera tracking & dirty-check snapshot (prevents jumpTo spam when idle)
     followCamera: true,
     isEasingCamera: false,
     easeTimer: null,
@@ -33,6 +33,7 @@
     currentPitch: CFG.modes.city.pitch,
     displayCoords: [...CFG.defaultCenter],
     displayHeading: CFG.defaultBearing,
+    lastCamApplied: null,
 
     // Vehicle kinematic state
     vehicle: {
@@ -163,8 +164,7 @@
     demoSpeedLabel: $('demo-speed-label'),
     speedChipBtns: document.querySelectorAll('.speed-chip-btn'),
     btnDemoReset: $('btn-demo-reset'),
-    btnForceCloseZoom: $('btn-force-close-zoom'),
-    forceCloseZoomLabel: $('force-close-zoom-label'),
+    toggleForceCloseZoom: $('toggle-force-close-zoom'),
     toggleTunnelSim: $('toggle-tunnel-sim'),
     debugPresetList: $('debug-preset-list'),
 
@@ -374,17 +374,18 @@
       state.map.remove();
       state.map = null;
       state.mapReady = false;
+      state.lastCamApplied = null;
     }
     initMapbox();
     showToast('Mapbox トークンを設定しました');
   }
 
   // =========================================================================
-  // Mapbox GL JS v3 Standard Style Initialization & 3D Route Layers
+  // Mapbox GL JS v3 Standard Style Initialization & Route Layers
   // =========================================================================
 
   /**
-   * 画面高さの55%を top padding として常時適用し、自車位置を画面の下部1/4へ固定
+   * 自車位置を常に画面下部1/4へ配置するパディング
    */
   function getCockpitPadding() {
     return {
@@ -406,53 +407,79 @@
 
     const map = new mapboxgl.Map({
       container: 'map',
-      style: CFG.mapStyle, // mapbox://styles/mapbox/standard
+      style: CFG.mapStyle, // 'mapbox://styles/mapbox/standard'
+      config: {
+        basemap: {
+          lightPreset: 'night',
+          show3dObjects: true,
+        },
+      },
       center: state.vehicle.coords,
       zoom: modeCfg.baseZoom,
       pitch: modeCfg.pitch,
       bearing: state.vehicle.heading,
       maxPitch: 85,
       maxZoom: 22,
-      padding: getCockpitPadding(),
       antialias: true,
       attributionControl: true,
     });
 
     state.map = map;
+    state.mapReady = false;
     state.currentZoom = modeCfg.baseZoom;
     state.currentPitch = modeCfg.pitch;
+    state.lastCamApplied = null;
 
     map.on('error', (e) => {
       const status = e && e.error && e.error.status;
-      if (status === 401 || status === 403) {
+      if (!state.mapReady && (status === 401 || status === 403)) {
         showToast('Mapboxアクセストークンが無効です。KEYボタンから再設定してください。', 'error', 5000);
         openTokenModal(false);
       }
     });
 
     map.on('style.load', () => {
-      state.mapReady = true;
-
-      // Mapbox Standard Style v3: 夜間ライティング＆3D立体交差・高架橋・車線標示・3D建物を有効化
+      // Standard Style 夜間3D設定（独自の fill-extrusion 建物レイヤーは絶対に追加しない）
       try {
         map.setConfigProperty('basemap', 'lightPreset', 'night');
         map.setConfigProperty('basemap', 'show3dObjects', true);
-      } catch (_err) {
-        // Fallback safety if style config API differs
-      }
+      } catch (_err) {}
+      try {
+        // 対応エリアで高精細3D道路・車線標示・高架橋を有効化
+        map.setConfigProperty('basemap', 'showHdRoads', true);
+      } catch (_err) {}
 
+      // ソースとレイヤーは必ず style.load 完了後に追加
       setupTerrainAndRouteSources(map);
       setupRouteLayers(map);
       setupEgoVehicleMarker(map);
-      map.setPadding(getCockpitPadding());
-      applyModeVisuals(state.mode, false);
 
+      state.mapReady = true;
+
+      // 初回パディング・カメラ・地形設定を適用
+      const pad = getCockpitPadding();
+      map.jumpTo({
+        center: state.displayCoords,
+        bearing: state.displayHeading,
+        zoom: state.currentZoom,
+        pitch: state.currentPitch,
+        padding: pad,
+      });
+      recordCameraSnapshot(
+        state.displayCoords,
+        state.displayHeading,
+        state.currentZoom,
+        state.currentPitch,
+        pad.top
+      );
+
+      applyTerrainForMode(state.mode);
       if (state.routeModel) {
         syncRouteSourcesToMap();
       }
     });
 
-    // Manual drag/rotate/pitch pauses auto-follow until user taps Recenter
+    // 手動ドラッグ・回転・傾き操作時は自動追従を一時停止
     const pauseFollowOnManualInput = (ev) => {
       if (ev && ev.originalEvent && state.followCamera) {
         setFollowCamera(false);
@@ -466,13 +493,14 @@
 
     window.addEventListener('resize', () => {
       if (state.map && state.mapReady) {
-        state.map.setPadding(getCockpitPadding());
+        const pad = getCockpitPadding();
+        state.map.setPadding(pad);
+        state.lastCamApplied = null;
       }
     });
   }
 
   function setupTerrainAndRouteSources(map) {
-    // 3D Terrain DEM source (enabled in Mountain Mode)
     if (!map.getSource('mapbox-dem')) {
       map.addSource('mapbox-dem', {
         type: 'raster-dem',
@@ -487,7 +515,7 @@
       map.addSource('route-traveled', { type: 'geojson', data: emptyFc });
     }
     if (!map.getSource('route-remaining')) {
-      map.addSource('route-remaining', { type: 'geojson', data: emptyFc, lineMetrics: true });
+      map.addSource('route-remaining', { type: 'geojson', data: emptyFc });
     }
     if (!map.getSource('route-jct-segment')) {
       map.addSource('route-jct-segment', { type: 'geojson', data: emptyFc });
@@ -499,10 +527,9 @@
 
   /**
    * Standard Style `slot: 'middle'` + `line-emissive-strength: 1` で
-   * 夜間ライティング下でも視認性の高い純正ナビブルー（#2563eb / #3b82f6）ルートを描画
+   * 視認性の高い純正ナビブルー（#2563eb / #3b82f6）ルートを描画
    */
   function setupRouteLayers(map) {
-    // Traveled trail behind vehicle
     if (!map.getLayer('route-traveled-line')) {
       map.addLayer({
         id: 'route-traveled-line',
@@ -519,7 +546,6 @@
       });
     }
 
-    // Route casing (deep blue edge for contrast against asphalt & lane markings)
     if (!map.getLayer('route-casing')) {
       map.addLayer({
         id: 'route-casing',
@@ -536,7 +562,6 @@
       });
     }
 
-    // Active route core (clean OEM navigation blue #3b82f6)
     if (!map.getLayer('route-core-ribbon')) {
       map.addLayer({
         id: 'route-core-ribbon',
@@ -553,7 +578,6 @@
       });
     }
 
-    // Upcoming Intersection / JCT highlight segment during close-range 3D zoom
     if (!map.getLayer('jct-segment-core')) {
       map.addLayer({
         id: 'jct-segment-core',
@@ -570,7 +594,6 @@
       });
     }
 
-    // Subtle target ring at maneuver point during close-range zoom
     if (!map.getLayer('jct-focus-ring')) {
       map.addLayer({
         id: 'jct-focus-ring',
@@ -598,7 +621,7 @@
     el.className = 'ego-vehicle-marker';
     el.innerHTML = `
       <svg viewBox="0 0 64 64" aria-hidden="true">
-        <circle cx="32" cy="34" r="22" fill="rgba(15, 15, 20, 0.72)" stroke="rgba(255, 255, 255, 0.85)" stroke-width="2.5"/>
+        <circle cx="32" cy="34" r="22" fill="rgba(18, 18, 22, 0.78)" stroke="rgba(255, 255, 255, 0.88)" stroke-width="2.5"/>
         <path class="ego-fill" d="M32 15 L45 45 L32 39 L19 45 Z"/>
       </svg>
     `;
@@ -632,13 +655,26 @@
   }
 
   // =========================================================================
-  // 3-Mode Visuals & Guaranteed Proximity Auto-3D Zoom Camera Controller
+  // 3-Mode Switching, Terrain & Per-Frame Proximity Auto-3D Zoom Camera
   // =========================================================================
+  function applyTerrainForMode(modeId) {
+    const map = state.map;
+    const modeCfg = CFG.modes[modeId];
+    if (!map || !state.mapReady || !modeCfg) return;
+
+    try {
+      if (modeCfg.enableTerrain && map.getSource('mapbox-dem')) {
+        map.setTerrain({ source: 'mapbox-dem', exaggeration: modeCfg.terrainExaggeration });
+      } else {
+        map.setTerrain(null);
+      }
+    } catch (_err) {}
+  }
+
   function setDrivingMode(modeId, animateCamera = true) {
     if (!CFG.modes[modeId]) return;
     state.mode = modeId;
 
-    // Re-evaluate proximity zoom cleanly for the newly selected mode
     state.autoCloseZoomActive = false;
     state.isCloseZoomActive = state.sim.forceCloseZoom;
     if (!state.isCloseZoomActive) {
@@ -649,50 +685,59 @@
       btn.classList.toggle('active', btn.dataset.mode === modeId);
     });
 
-    applyModeVisuals(modeId, animateCamera);
-    evaluateCloseZoomEveryFrame(false);
-    refreshGuidanceUi();
-    showToast(`${CFG.modes[modeId].label}モードに切替ました`, 'info', 1800);
-  }
+    applyTerrainForMode(modeId);
 
-  function applyModeVisuals(modeId, animateCamera) {
-    const map = state.map;
-    const modeCfg = CFG.modes[modeId];
-    if (!map || !state.mapReady || !modeCfg) return;
-
-    // Standard Style 3D objects remain active (3D interchanges, overpasses, lanes, buildings)
-    try {
-      map.setConfigProperty('basemap', 'lightPreset', 'night');
-      map.setConfigProperty('basemap', 'show3dObjects', true);
-    } catch (_err) {}
-
-    // 3D DEM Terrain enabled in Mountain Mode
-    if (modeCfg.enableTerrain) {
-      map.setTerrain({ source: 'mapbox-dem', exaggeration: modeCfg.terrainExaggeration });
-    } else {
-      map.setTerrain(null);
-    }
-
-    const speedKmh = state.vehicle.speedMps * 3.6;
-    const targetZoom = Geo.computeSpeedAdaptiveZoom(modeId, speedKmh, state.isCloseZoomActive);
+    const targetZoom = Geo.computeSpeedAdaptiveZoom(
+      modeId,
+      state.vehicle.speedMps * 3.6,
+      state.isCloseZoomActive
+    );
     const targetPitch = Geo.computeTargetPitch(modeId, state.isCloseZoomActive);
 
-    if (animateCamera && state.followCamera) {
-      triggerSmoothCameraEase(targetZoom, targetPitch, 950);
+    if (animateCamera && state.followCamera && state.map && state.mapReady) {
+      triggerSmoothCameraEase(targetZoom, targetPitch, 900);
     } else {
       state.currentZoom = targetZoom;
       state.currentPitch = targetPitch;
+      state.lastCamApplied = null;
     }
+
+    evaluateCloseZoomEveryFrame(false);
+    updateNavigationAnalytics();
+    showToast(`${CFG.modes[modeId].label}モードに切替ました`, 'info', 1800);
   }
 
-  function triggerSmoothCameraEase(targetZoom, targetPitch, durationMs = 950) {
+  function recordCameraSnapshot(coords, bearing, zoom, pitch, padTop) {
+    state.lastCamApplied = {
+      lng: coords[0],
+      lat: coords[1],
+      bearing,
+      zoom,
+      pitch,
+      padTop,
+    };
+  }
+
+  function cameraHasChanged(coords, bearing, zoom, pitch, padTop) {
+    const prev = state.lastCamApplied;
+    if (!prev) return true;
+    return (
+      Math.abs(coords[0] - prev.lng) > 1e-7 ||
+      Math.abs(coords[1] - prev.lat) > 1e-7 ||
+      Math.abs(Geo.angleDiff(prev.bearing, bearing)) > 0.08 ||
+      Math.abs(zoom - prev.zoom) > 0.004 ||
+      Math.abs(pitch - prev.pitch) > 0.05 ||
+      padTop !== prev.padTop
+    );
+  }
+
+  function triggerSmoothCameraEase(targetZoom, targetPitch, durationMs = 900) {
     if (!state.map || !state.mapReady) return;
     state.isEasingCamera = true;
     state.currentZoom = targetZoom;
     state.currentPitch = targetPitch;
 
-    // Predict vehicle pose at end of easeTo so moving transitions land seamlessly without jump
-    let targetCenter = state.vehicle.coords;
+    let targetCenter = [...state.vehicle.coords];
     let targetBearing = state.vehicle.heading;
     const isMoving =
       (state.sim.demoMode || state.gps.isDeadReckoning) && state.vehicle.speedMps > 1;
@@ -708,17 +753,19 @@
       targetBearing = Geo.getRouteHeadingAt(state.routeModel, predDistKm, 0.025);
     }
 
+    const pad = getCockpitPadding();
     clearTimeout(state.easeTimer);
     state.map.easeTo({
       center: targetCenter,
       bearing: targetBearing,
       zoom: targetZoom,
       pitch: targetPitch,
-      padding: getCockpitPadding(),
+      padding: pad,
       duration: durationMs,
       easing: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
       essential: true,
     });
+    recordCameraSnapshot(targetCenter, targetBearing, targetZoom, targetPitch, pad.top);
 
     state.easeTimer = setTimeout(() => {
       state.isEasingCamera = false;
@@ -727,7 +774,7 @@
 
   /**
    * 毎フレーム turf.distance で routes[0].legs[0].steps の各 maneuver.location との距離を計算し、
-   * 閾値（市街地 150m / 高速 800m）を下回ったら確実に map.easeTo を発火させる。
+   * 閾値（市街地 150m / 高速 800m）以下で確実に至近距離 3D カメラ（easeTo）を発火させる。
    */
   function evaluateCloseZoomEveryFrame(notify = true) {
     const modeCfg = CFG.modes[state.mode];
@@ -760,6 +807,7 @@
       } else {
         state.currentZoom = targetZoom;
         state.currentPitch = targetPitch;
+        state.lastCamApplied = null;
       }
 
       refreshGuidanceUi();
@@ -773,20 +821,16 @@
             2400
           );
         } else {
-          showToast('通過完了 — 通常視点へ復帰', 'info', 2000);
+          showToast('通過完了 — 巡航視点へ復帰', 'info', 2000);
         }
       }
     }
   }
 
-  function toggleForceCloseZoom() {
-    state.sim.forceCloseZoom = !state.sim.forceCloseZoom;
-    dom.btnForceCloseZoom.classList.toggle('active', state.sim.forceCloseZoom);
-    dom.forceCloseZoomLabel.textContent = state.sim.forceCloseZoom
-      ? '至近距離カメラ強制中（解除する）'
-      : '至近距離カメラを強制 ON';
+  function setForceCloseZoom(enabled) {
+    state.sim.forceCloseZoom = Boolean(enabled);
+    dom.toggleForceCloseZoom.checked = state.sim.forceCloseZoom;
 
-    // Always follow camera when testing close-up zoom so user sees easeTo immediately
     if (state.sim.forceCloseZoom && !state.followCamera) {
       state.followCamera = true;
       dom.btnRecenter.classList.add('active');
@@ -803,13 +847,16 @@
 
     if (state.map && state.mapReady) {
       triggerSmoothCameraEase(targetZoom, targetPitch, 850);
+    } else {
+      state.currentZoom = targetZoom;
+      state.currentPitch = targetPitch;
     }
 
     refreshGuidanceUi();
     showToast(
       state.sim.forceCloseZoom
-        ? `至近距離カメラ強制 ON（Zoom ${targetZoom} / Pitch ${targetPitch}°）`
-        : `通常カメラへ復帰（Zoom ${targetZoom} / Pitch ${targetPitch}°）`,
+        ? `強制3Dズーム ON（Zoom ${targetZoom} / Pitch ${targetPitch}°）`
+        : `強制3Dズーム OFF（Zoom ${targetZoom} / Pitch ${targetPitch}°）`,
       'info',
       2400
     );
@@ -883,7 +930,7 @@
   }
 
   // =========================================================================
-  // Destination Search (Search Box API + Geocoding v6 Fallback) & Long-Press
+  // Destination Search (Mapbox Geocoding API) & Map Click / Long-Press
   // =========================================================================
   async function searchPlaces(query) {
     const q = query.trim();
@@ -895,34 +942,34 @@
     const [lng, lat] = state.vehicle.coords;
     let items = [];
 
+    // Primary: Mapbox Geocoding API v5 (日本語の施設名・駅・IC・住所を幅広く検索可能)
     try {
-      const sbUrl =
-        `https://api.mapbox.com/search/searchbox/v1/forward` +
-        `?q=${encodeURIComponent(q)}` +
-        `&language=ja&limit=5&proximity=${lng.toFixed(5)},${lat.toFixed(5)}` +
+      const v5Url =
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json` +
+        `?language=ja&limit=5&proximity=${lng.toFixed(5)},${lat.toFixed(5)}` +
         `&access_token=${encodeURIComponent(state.accessToken)}`;
-      const res = await fetch(sbUrl);
+      const res = await fetch(v5Url);
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.features) && data.features.length > 0) {
           items = data.features.map((f) => ({
-            name: (f.properties && (f.properties.name || f.properties.full_address)) || q,
-            address:
-              (f.properties && (f.properties.full_address || f.properties.place_formatted)) || '',
-            coords: f.geometry && f.geometry.coordinates,
+            name: f.text_ja || f.text || f.place_name_ja || f.place_name || q,
+            address: f.place_name_ja || f.place_name || '',
+            coords: f.center || (f.geometry && f.geometry.coordinates),
           }));
         }
       }
     } catch (_err) {}
 
+    // Fallback: Mapbox Geocoding API v6
     if (items.length === 0) {
       try {
-        const geoUrl =
+        const v6Url =
           `https://api.mapbox.com/search/geocode/v6/forward` +
           `?q=${encodeURIComponent(q)}` +
           `&language=ja&limit=5&proximity=${lng.toFixed(5)},${lat.toFixed(5)}` +
           `&access_token=${encodeURIComponent(state.accessToken)}`;
-        const res = await fetch(geoUrl);
+        const res = await fetch(v6Url);
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data.features)) {
@@ -939,7 +986,7 @@
     const valid = items.filter((it) => Array.isArray(it.coords) && it.coords.length >= 2);
     if (valid.length === 0) {
       dom.searchResultsList.innerHTML =
-        '<div class="map-hint-note">候補が見つかりませんでした。別のキーワードまたはマップ長押しでお試しください。</div>';
+        '<div class="map-hint-note">候補が見つかりませんでした。別のキーワードまたはマップ上のクリック／タップでお試しください。</div>';
       return;
     }
 
@@ -965,19 +1012,18 @@
     if (!state.accessToken) return `${coords[1].toFixed(4)}, ${coords[0].toFixed(4)}`;
     try {
       const url =
-        `https://api.mapbox.com/search/geocode/v6/reverse` +
-        `?longitude=${coords[0].toFixed(6)}&latitude=${coords[1].toFixed(6)}` +
-        `&language=ja&limit=1&access_token=${encodeURIComponent(state.accessToken)}`;
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${coords[0].toFixed(6)},${coords[1].toFixed(6)}.json` +
+        `?language=ja&limit=1&access_token=${encodeURIComponent(state.accessToken)}`;
       const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         const feat = data.features && data.features[0];
-        if (feat && feat.properties) {
-          return feat.properties.name || feat.properties.full_address || '選択した地点';
+        if (feat) {
+          return feat.text_ja || feat.text || feat.place_name_ja || feat.place_name || '選択した地点';
         }
       }
     } catch (_err) {}
-    return `ピン指定地点 (${coords[1].toFixed(4)}, ${coords[0].toFixed(4)})`;
+    return `指定地点 (${coords[1].toFixed(4)}, ${coords[0].toFixed(4)})`;
   }
 
   function bindMapDestinationGestures(map) {
@@ -1053,12 +1099,12 @@
       await openPinConfirmation([e.lngLat.lng, e.lngLat.lat]);
     });
 
+    // マップ上のクリック / タップでいつでも目的地ピン設定が可能
     map.on('click', async (e) => {
       if (longPressed) {
         longPressed = false;
         return;
       }
-      if (!state.pinModeActive && state.routeModel) return;
       await openPinConfirmation([e.lngLat.lng, e.lngLat.lat]);
     });
   }
@@ -1095,37 +1141,24 @@
   }
 
   // =========================================================================
-  // Mapbox Directions API Route Fetch & Route Rendering
+  // Mapbox Directions API (`mapbox/driving`) Route Fetch & Rendering
   // =========================================================================
   async function fetchDirectionsRoute(originCoords, destCoords) {
-    const query =
-      'geometries=geojson&steps=true&overview=full&annotations=distance,speed' +
-      '&banner_instructions=true&language=ja' +
-      `&access_token=${encodeURIComponent(state.accessToken)}`;
     const coordStr = `${originCoords[0].toFixed(6)},${originCoords[1].toFixed(6)};${destCoords[0].toFixed(6)},${destCoords[1].toFixed(6)}`;
+    const url =
+      `https://api.mapbox.com/directions/v5/mapbox/driving/${coordStr}` +
+      `?steps=true&geometries=geojson&overview=full&annotations=distance,speed&language=ja` +
+      `&access_token=${encodeURIComponent(state.accessToken)}`;
 
-    const profiles = ['mapbox/driving-traffic', 'mapbox/driving'];
-    let lastError = null;
-
-    for (const profile of profiles) {
-      try {
-        const url = `https://api.mapbox.com/directions/v5/${profile}/${coordStr}?${query}`;
-        const res = await fetch(url);
-        if (!res.ok) {
-          lastError = new Error(`Directions HTTP ${res.status}`);
-          continue;
-        }
-        const data = await res.json();
-        if (data && Array.isArray(data.routes) && data.routes.length > 0) {
-          return data.routes[0];
-        }
-        lastError = new Error(data.message || 'No route found');
-      } catch (err) {
-        lastError = err;
-      }
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`Directions HTTP ${res.status}`);
     }
-
-    throw lastError || new Error('ルート取得に失敗しました');
+    const data = await res.json();
+    if (!data || !Array.isArray(data.routes) || data.routes.length === 0) {
+      throw new Error((data && data.message) || 'ルートが見つかりませんでした');
+    }
+    return data.routes[0];
   }
 
   async function setDestinationAndFetchRoute(destCoords, destName, customOrigin = null) {
@@ -1154,6 +1187,7 @@
       state.isCloseZoomActive = state.sim.forceCloseZoom;
       state.activePaceNote = null;
       state.lastPaceHeadline = '';
+      state.lastCamApplied = null;
 
       updateDestinationMarker(destCoords);
       syncRouteSourcesToMap();
@@ -1197,11 +1231,11 @@
     updateDestinationMarker(null);
     updateJctBeaconOnMap(null);
     syncRouteSourcesToMap();
-    applyModeVisuals(state.mode, true);
+    setFollowCamera(true);
     refreshGuidanceUi();
     dom.btnClearRoute.classList.add('hidden');
     dom.destTriggerTitle.textContent = '目的地を検索 / タップ設定';
-    dom.destTriggerMeta.textContent = 'ルート未設定 · 長押し対応';
+    dom.destTriggerMeta.textContent = 'ルート未設定 · クリック/長押し対応';
     showToast('ルート案内を終了しました');
   }
 
@@ -1241,7 +1275,7 @@
       dom.demoActiveChip.classList.remove('hidden');
       state.vehicle.speedMps = preset.defaultSpeedKmh / 3.6;
       state.gps.lastValidSpeedMps = state.vehicle.speedMps;
-      applyModeVisuals(preset.mode, true);
+      setFollowCamera(true);
       showToast(`${preset.badge}デモ走行を開始 (${preset.defaultSpeedKmh} km/h)`);
     }
   }
@@ -1346,6 +1380,7 @@
     if (wasFirstFix) {
       state.displayCoords = [...state.vehicle.coords];
       state.displayHeading = state.vehicle.heading;
+      state.lastCamApplied = null;
     }
 
     state.gps.lastValidHeading = state.vehicle.heading;
@@ -1397,7 +1432,6 @@
     updateGpsStatusUi();
   }
 
-  // Watchdog checks GPS freshness every 250ms
   setInterval(() => {
     if (state.sim.tunnelLost) {
       if (!state.gps.isDeadReckoning) enterDeadReckoning('トンネル進入シミュレーション');
@@ -1495,12 +1529,12 @@
       }
     }
 
-    // 2. Per-frame turf.distance check against routes[0].legs[0].steps maneuver.location
+    // 2. Per-frame turf.distance proximity check against routes[0].legs[0].steps
     if (state.routeModel) {
       evaluateCloseZoomEveryFrame(true);
     }
 
-    // 3. Smooth display interpolation & 3D Mapbox Camera update
+    // 3. Smooth display interpolation & dirty-checked 3D Mapbox Camera update
     const smoothFactor = Math.min(1, dtSec * 10);
     state.displayCoords[0] += (state.vehicle.coords[0] - state.displayCoords[0]) * smoothFactor;
     state.displayCoords[1] += (state.vehicle.coords[1] - state.displayCoords[1]) * smoothFactor;
@@ -1528,21 +1562,40 @@
         );
         const desiredPitch = Geo.computeTargetPitch(state.mode, state.isCloseZoomActive);
 
-        const zoomLerp = Math.min(1, dtSec * 2.6);
+        const zoomLerp = Math.min(1, dtSec * 3.0);
         state.currentZoom += (desiredZoom - state.currentZoom) * zoomLerp;
         state.currentPitch += (desiredPitch - state.currentPitch) * zoomLerp;
 
-        state.map.jumpTo({
-          center: state.displayCoords,
-          bearing: state.displayHeading,
-          zoom: state.currentZoom,
-          pitch: state.currentPitch,
-          padding: getCockpitPadding(),
-        });
+        const pad = getCockpitPadding();
+        // Only invoke jumpTo when pose actually changed (prevents stationary GPU/input interference)
+        if (
+          cameraHasChanged(
+            state.displayCoords,
+            state.displayHeading,
+            state.currentZoom,
+            state.currentPitch,
+            pad.top
+          )
+        ) {
+          state.map.jumpTo({
+            center: state.displayCoords,
+            bearing: state.displayHeading,
+            zoom: state.currentZoom,
+            pitch: state.currentPitch,
+            padding: pad,
+          });
+          recordCameraSnapshot(
+            state.displayCoords,
+            state.displayHeading,
+            state.currentZoom,
+            state.currentPitch,
+            pad.top
+          );
+        }
       }
     }
 
-    // 4. Update Instrument Cluster & Debug Readouts
+    // 4. Instrument cluster & debug readouts
     renderSpeedometerAndTelemetry();
     if (state.gps.isDeadReckoning) {
       updateGpsStatusUi();
@@ -1605,8 +1658,8 @@
     }
 
     if (state.debugOpen) {
-      dom.dbgZoom.textContent = state.map ? state.map.getZoom().toFixed(2) : '--';
-      dom.dbgPitch.textContent = state.map ? `${Math.round(state.map.getPitch())}°` : '--';
+      dom.dbgZoom.textContent = state.map ? state.map.getZoom().toFixed(2) : state.currentZoom.toFixed(2);
+      dom.dbgPitch.textContent = state.map ? `${Math.round(state.map.getPitch())}°` : `${Math.round(state.currentPitch)}°`;
       dom.dbgAutoZoom.textContent = state.sim.forceCloseZoom
         ? 'FORCED'
         : state.autoCloseZoomActive
@@ -1617,7 +1670,7 @@
         ? Geo.formatDistanceJa(state.lastManeuverDirectDistM)
         : '--';
       dom.dbgCurve.textContent = state.activePaceNote
-        ? `${state.activePaceNote.grade} (${state.activePaceNote.absTurnDeg}°)`
+        ? state.activePaceNote.callout
         : 'CLEAR';
     }
   }
@@ -1674,17 +1727,17 @@
           state.lastPaceHeadline = p.headline;
         }
         dom.paceIconBox.innerHTML = getPaceNoteSvg(p);
-        dom.paceGradePill.textContent = p.grade;
+        dom.paceGradePill.textContent = p.callout;
         dom.paceKicker.textContent = p.hasChicane
           ? '前方曲率ペースノート · 連続S字'
-          : '前方曲率ペースノート';
+          : '前方100–250m 曲率解析';
         dom.paceHeadline.textContent = p.headline;
         dom.paceSubline.textContent = p.subline;
       } else {
         state.lastPaceHeadline = '';
         dom.mountainClearPill.classList.remove('hidden');
         dom.mountainStatusText.textContent = state.routeModel
-          ? '前方300m 緩やか（急カーブなし）'
+          ? '前方250m 緩やか（急カーブなし）'
           : 'ルート設定で実ルート曲率ペースノート稼働';
       }
       return;
@@ -1699,7 +1752,7 @@
       dom.jctZoomBadge.classList.toggle('hidden', !state.sim.forceCloseZoom);
       if (state.sim.forceCloseZoom) dom.jctZoomBadge.textContent = '強制3Dズーム';
       dom.guidanceInstruction.textContent = '目的地を設定してルート案内を開始';
-      dom.guidanceSub.textContent = '左下の検索、またはマップ長押しで目的地を指定できます';
+      dom.guidanceSub.textContent = '左下の検索、またはマップをクリック／タップして目的地指定';
       return;
     }
 
@@ -1712,7 +1765,7 @@
       dom.guidanceBanner.className = 'hud-panel guidance-banner';
       dom.maneuverIconBox.innerHTML = getManeuverSvg(branch.maneuverKey);
       dom.guidanceDistance.textContent = Geo.formatDistanceJa(distMeters);
-      dom.guidanceTag.textContent = nav.isFallbackBranch ? '次の案内' : branch.branchTag;
+      dom.guidanceTag.textContent = nav.isFallbackBranch ? '次の分岐' : branch.branchTag;
       dom.jctZoomBadge.classList.toggle('hidden', !state.isCloseZoomActive);
       dom.jctZoomBadge.textContent = state.sim.forceCloseZoom ? '強制3Dズーム' : 'JCT 3Dズーム';
       dom.guidanceInstruction.textContent = branch.title || branch.instruction;
@@ -1765,7 +1818,7 @@
     }
     if (active) {
       setSearchDrawerOpen(false);
-      showToast('マップをタップして目的地を選択してください');
+      showToast('マップ上の任意の場所をタップして目的地を設定できます');
     }
   }
 
@@ -1895,6 +1948,7 @@
       state.displayHeading = state.vehicle.heading;
       state.autoCloseZoomActive = false;
       state.isCloseZoomActive = state.sim.forceCloseZoom;
+      state.lastCamApplied = null;
       updateJctBeaconOnMap(null);
       syncRouteSourcesToMap();
       updateNavigationAnalytics();
@@ -1903,8 +1957,10 @@
       showToast('スタート地点へ戻しました');
     });
 
-    // Debug: Force Intersection / JCT Close-Up Camera Verification Button
-    dom.btnForceCloseZoom.addEventListener('click', toggleForceCloseZoom);
+    // Debug: Force Intersection / JCT 3D Zoom Toggle
+    dom.toggleForceCloseZoom.addEventListener('change', () => {
+      setForceCloseZoom(dom.toggleForceCloseZoom.checked);
+    });
 
     // Debug: Tunnel / GPS Lost Toggle
     dom.toggleTunnelSim.addEventListener('change', () => {

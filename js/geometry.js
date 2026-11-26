@@ -537,18 +537,13 @@
    * - Highway:  cruise 16.8 / 68° (subtle speed nuance), JCT <=800m -> 19.5 / 78°
    * - Mountain: normal 18.2 / 72°
    */
-  function computeSpeedAdaptiveZoom(modeId, speedKmh, isCloseZoomActive) {
-    const v = clamp(Number.isFinite(speedKmh) ? speedKmh : 0, 0, 180);
-
+  function computeSpeedAdaptiveZoom(modeId, _speedKmh, isCloseZoomActive) {
     if (modeId === 'city') {
       return isCloseZoomActive ? 20.3 : 19.2;
     }
 
     if (modeId === 'highway') {
-      if (isCloseZoomActive) return 19.5;
-      // Centered cleanly at 16.8 (~85 km/h) with subtle speed adaptation [16.65 .. 16.95]
-      const t = clamp((v - 40) / 100, 0, 1);
-      return Number((16.95 - t * 0.3).toFixed(3));
+      return isCloseZoomActive ? 19.5 : 16.8;
     }
 
     // Mountain mode
@@ -565,9 +560,9 @@
    * Real-Route Rally Pace Note Curvature Analyzer (Mountain / Winding Mode).
    *
    * Samples the real route LineString uniformly ahead of currentDistKm using Turf.js
-   * (focusing on 100m–300m lookahead + 25m–100m active approach zone), calculates
-   * bearing changes (azimuth deltas) and curvature radii, and outputs rally-style
-   * pace note warnings (R1 Hairpin -> R4 Medium Curve + S-Curve chicane detection).
+   * (100m–250m forward lookahead + active approach zone), calculates bearing changes
+   * via turf.bearing and curvature radii, and outputs rally pace notes
+   * (e.g. "HAIRPIN LEFT", "RIGHT R3").
    */
   function analyzeMountainPaceNote(routeModel, currentDistKm, options = {}) {
     if (!routeModel || !routeModel.line || routeModel.totalKm < 0.08) {
@@ -577,8 +572,8 @@
     const stepMeters = options.sampleStepMeters || 15;
     const minTrackMeters = options.minTrackMeters || 25;
     const lookaheadMinMeters = options.lookaheadMinMeters || 100;
-    const lookaheadMaxMeters = options.lookaheadMaxMeters || 300;
-    const maxSampleMeters = lookaheadMaxMeters + 60; // extra buffer to finish measuring curves starting near 300m
+    const lookaheadMaxMeters = options.lookaheadMaxMeters || 250;
+    const maxSampleMeters = lookaheadMaxMeters + 60;
 
     const startKm = clamp(currentDistKm, 0, routeModel.totalKm);
     const availableAheadMeters = (routeModel.totalKm - startKm) * 1000;
@@ -747,13 +742,17 @@
     );
 
     const hasChicane = Boolean(followOpposite);
-    const headline = `${primary.distanceMeters}m先 ${primary.directionJa}${primary.label}（${primary.grade}）`;
+    const dirEn = primary.direction === 'right' ? 'RIGHT' : 'LEFT';
+    const callout =
+      primary.grade === 'R1' ? `HAIRPIN ${dirEn}` : `${dirEn} ${primary.grade}`;
+    const headline = `${callout} · ${primary.distanceMeters}m先 ${primary.directionJa}${primary.label}`;
     const subline = hasChicane
       ? `連続S字（次:${followOpposite.directionJa}${followOpposite.grade}） · 曲角 ${primary.absTurnDeg}° · 推定R ${primary.radiusMeters}m`
       : `曲角 ${primary.absTurnDeg}° · 推定曲率半径 R≈${primary.radiusMeters}m`;
 
     return {
       ...primary,
+      callout,
       hasChicane,
       headline,
       subline,

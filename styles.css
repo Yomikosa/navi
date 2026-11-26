@@ -7,15 +7,15 @@
 :root {
   /* OEM Matte Dark Glass Surfaces */
   --bg-void: #0b0c10;
-  --surface-glass: rgba(15, 15, 20, 0.75);
-  --surface-glass-strong: rgba(15, 15, 20, 0.88);
+  --surface-glass: rgba(18, 18, 22, 0.78);
+  --surface-glass-strong: rgba(18, 18, 22, 0.90);
   --surface-control: rgba(255, 255, 255, 0.06);
   --surface-control-hover: rgba(255, 255, 255, 0.11);
 
   /* Subtle Hairline Borders */
-  --border-hairline: 1px solid rgba(255, 255, 255, 0.12);
-  --border-subtle-color: rgba(255, 255, 255, 0.12);
-  --border-strong-color: rgba(255, 255, 255, 0.22);
+  --border-hairline: 1px solid rgba(255, 255, 255, 0.1);
+  --border-subtle-color: rgba(255, 255, 255, 0.1);
+  --border-strong-color: rgba(255, 255, 255, 0.2);
 
   /* Unified Automotive Blue Accent + Functional Semantic Colors */
   --accent-blue: #3b82f6;
@@ -1013,11 +1013,11 @@ body {
 .debug-drawer {
   position: absolute;
   top: calc(var(--safe-top) + 48px);
-  right: var(--safe-right);
+  right: calc(var(--safe-right) + 124px);
   bottom: var(--safe-bottom);
-  width: min(318px, calc(100vw - var(--left-rail-w) - 36px));
+  width: min(304px, calc(100vw - var(--left-rail-w) - 156px));
   z-index: 35;
-  padding: 14px;
+  padding: 13px;
   display: flex;
   flex-direction: column;
   gap: 10px;

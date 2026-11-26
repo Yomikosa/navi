@@ -22,8 +22,8 @@
   <link href="https://api.mapbox.com/mapbox-gl-js/v3.35.0/mapbox-gl.css" rel="stylesheet" />
   <script src="https://api.mapbox.com/mapbox-gl-js/v3.35.0/mapbox-gl.js"></script>
 
-  <!-- Turf.js v7 -->
-  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@7/turf.min.js"></script>
+  <!-- Turf.js v6 -->
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 
   <link rel="stylesheet" href="./styles.css" />
 </head>
@@ -183,7 +183,7 @@
             <span id="pace-grade-pill" class="pace-grade-pill">R3</span>
             <span id="pace-kicker" class="pace-kicker">前方曲率ペースノート</span>
           </div>
-          <div id="pace-headline" class="pace-headline">150m先 右急カーブ（R3）</div>
+          <div id="pace-headline" class="pace-headline">RIGHT R3 · 150m先 右急カーブ</div>
           <div id="pace-subline" class="pace-subline">曲角 52° · 推定曲率半径 R≈68m</div>
         </div>
       </div>
@@ -192,7 +192,7 @@
       <div id="mountain-clear-pill" class="hud-panel mountain-clear-pill hidden">
         <span>3D 地形</span>
         <span>·</span>
-        <strong id="mountain-status-text">前方300m 緩やか</strong>
+        <strong id="mountain-status-text">前方250m 緩やか</strong>
       </div>
     </section>
 
@@ -329,19 +329,18 @@
         </button>
       </div>
 
-      <!-- 2. Force Close-Up Intersection / JCT 3D Camera Verification Button -->
+      <!-- 2. Force Close-Up Intersection / JCT 3D Zoom Toggle -->
       <div class="control-group">
-        <div class="toggle-label-wrap">
-          <div class="toggle-title">交差点 / JCT 至近距離カメラ確認</div>
-          <div class="toggle-desc">市街地(20.3 / 80°)・高速(19.5 / 78°)へ強制切替</div>
+        <div class="toggle-row">
+          <div class="toggle-label-wrap">
+            <div class="toggle-title">強制JCT / 交差点3Dズーム</div>
+            <div class="toggle-desc">市街地(20.3/80°)・高速(19.5/78°)確認</div>
+          </div>
+          <label class="switch" aria-label="強制JCT交差点3Dズーム切替">
+            <input id="toggle-force-close-zoom" type="checkbox" />
+            <span class="switch-track"></span>
+          </label>
         </div>
-        <button id="btn-force-close-zoom" type="button" class="btn-ghost" style="width:100%;">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="7" />
-            <path d="m20 20-3.5-3.5M11 8v6M8 11h6" />
-          </svg>
-          <span id="force-close-zoom-label">至近距離カメラを強制 ON</span>
-        </button>
       </div>
 
       <!-- 3. Tunnel / GPS Lost Simulation Toggle -->
