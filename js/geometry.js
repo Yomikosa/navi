@@ -226,6 +226,22 @@
       expectedDistKm += (step.distance || 0) / 1000;
 
       const isBranch = isHighwayBranchStep(step);
+      const classSet = new Set();
+      if (Array.isArray(step.intersections)) {
+        step.intersections.forEach((inter) => {
+          if (inter && Array.isArray(inter.classes)) {
+            inter.classes.forEach((c) => classSet.add(String(c).toLowerCase()));
+          }
+        });
+      }
+      const roadClasses = Array.from(classSet);
+      const isMotorwayOrElevated =
+        classSet.has('motorway') ||
+        classSet.has('bridge') ||
+        /(首都高|高速|自動車道|JCT|IC|ランプ|バイパス|高架)/i.test(
+          `${step.name || ''} ${step.ref || ''} ${step.destinations || ''}`
+        );
+
       return {
         index: idx,
         routeDistKm: mappedKm,
@@ -241,6 +257,8 @@
         instruction: (step.maneuver && step.maneuver.instruction) || extractStepTitle(step),
         isHighwayBranch: isBranch,
         branchTag: getBranchTypeTag(step),
+        roadClasses,
+        isMotorwayOrElevated,
       };
     });
 
@@ -657,62 +675,50 @@
     }
     if (current) corners.push(current);
 
-    // Filter corners relevant to the forward window (entry between 25m and 300m)
+    // Filter corners relevant to the forward window (entry between 25m and 250m)
+    // Strictly classifies into 4 Initial-D style tiers + direction:
+    //   20° <= angle < 45°  -> EASY
+    //   45° <= angle < 80°  -> MEDIUM
+    //   80° <= angle < 130° -> HARD
+    //   angle >= 130°       -> HAIRPIN
+    //   angle < 20°         -> null (hidden)
     const evaluated = corners
       .filter((c) => c.startDistM >= minTrackMeters && c.startDistM <= lookaheadMaxMeters)
       .map((c) => {
         const absTurnDeg = Math.abs(c.totalTurnDeg);
-        const arcLengthM = Math.max(stepMeters, c.endDistM - c.startDistM);
-        const turnRad = (absTurnDeg * Math.PI) / 180;
-        const radiusM = turnRad > 0.01 ? arcLengthM / turnRad : 999;
-        // Max 30m local rate (sharpness proxy)
-        const sharpLocalDeg = c.maxStepTurnDeg * 2;
+        if (absTurnDeg < 20) return null;
 
-        let grade = null;
-        let severity = 0;
-        let label = '';
-
-        if (absTurnDeg >= 105 || (absTurnDeg >= 80 && radiusM <= 35) || sharpLocalDeg >= 68) {
-          grade = 'R1';
+        let tier = 'EASY';
+        let severity = 1;
+        if (absTurnDeg >= 130) {
+          tier = 'HAIRPIN';
           severity = 4;
-          label = 'ヘアピン注意';
-        } else if (absTurnDeg >= 68 || (absTurnDeg >= 52 && radiusM <= 65) || sharpLocalDeg >= 48) {
-          grade = 'R2';
+        } else if (absTurnDeg >= 80) {
+          tier = 'HARD';
           severity = 3;
-          label = '急カーブ注意';
-        } else if (absTurnDeg >= 42 || (absTurnDeg >= 32 && radiusM <= 115) || sharpLocalDeg >= 32) {
-          grade = 'R3';
+        } else if (absTurnDeg >= 45) {
+          tier = 'MEDIUM';
           severity = 2;
-          label = '急カーブ';
-        } else if (absTurnDeg >= 26) {
-          grade = 'R4';
-          severity = 1;
-          label = '中カーブ';
         }
 
-        if (!grade) return null;
-
         const direction = c.sign > 0 ? 'right' : 'left';
-        const directionJa = c.sign > 0 ? '右' : '左';
+        const dirEn = c.sign > 0 ? 'RIGHT' : 'LEFT';
         const inPrimaryLookahead =
           c.startDistM >= lookaheadMinMeters && c.startDistM <= lookaheadMaxMeters;
 
-        // Priority score favors severity & closeness
         const score = severity * 100 - c.startDistM * 0.25 + (inPrimaryLookahead ? 15 : 0);
 
         return {
-          grade,
+          tier,
+          grade: tier,
           severity,
           direction,
-          directionJa,
-          label,
+          dirEn,
+          callout: `${dirEn} · ${tier}`,
           distanceMeters: Math.max(10, Math.round(c.startDistM / 10) * 10),
           rawDistanceMeters: c.startDistM,
-          peakDistM: c.peakDistM,
-          endDistM: c.endDistM,
           totalTurnDeg: Math.round(c.totalTurnDeg),
           absTurnDeg: Math.round(absTurnDeg),
-          radiusMeters: Math.round(radiusM),
           inPrimaryLookahead,
           score,
         };
@@ -721,42 +727,82 @@
 
     if (evaluated.length === 0) return null;
 
-    // Pick closest severe curve; if two curves exist, prefer the immediate hazard
     evaluated.sort((a, b) => {
-      // If one is imminent (<120m) and severe, surface it first
-      if (a.rawDistanceMeters < 120 && b.rawDistanceMeters >= 150 && a.severity >= 2) return -1;
-      if (b.rawDistanceMeters < 120 && a.rawDistanceMeters >= 150 && b.severity >= 2) return 1;
+      if (a.rawDistanceMeters < 110 && b.rawDistanceMeters >= 150 && a.severity >= 2) return -1;
+      if (b.rawDistanceMeters < 110 && a.rawDistanceMeters >= 150 && b.severity >= 2) return 1;
       return b.score - a.score;
     });
 
-    const primary = evaluated[0];
+    return evaluated[0];
+  }
 
-    // Check for S-Curve (opposite direction bend following closely within 130m)
-    const followOpposite = evaluated.find(
-      (c) =>
-        c !== primary &&
-        c.direction !== primary.direction &&
-        c.rawDistanceMeters > primary.rawDistanceMeters &&
-        c.rawDistanceMeters - primary.endDistM <= 130 &&
-        c.absTurnDeg >= 32
-    );
+  /**
+   * Return the Directions API step the vehicle is currently traveling ON.
+   */
+  function getActiveRouteStep(routeModel, currentDistKm) {
+    if (!routeModel || !Array.isArray(routeModel.steps) || routeModel.steps.length === 0) {
+      return null;
+    }
+    let active = routeModel.steps[0];
+    for (let i = 0; i < routeModel.steps.length; i++) {
+      if (routeModel.steps[i].routeDistKm <= currentDistKm + 0.01) {
+        active = routeModel.steps[i];
+      } else {
+        break;
+      }
+    }
+    return active;
+  }
 
-    const hasChicane = Boolean(followOpposite);
-    const dirEn = primary.direction === 'right' ? 'RIGHT' : 'LEFT';
-    const callout =
-      primary.grade === 'R1' ? `HAIRPIN ${dirEn}` : `${dirEn} ${primary.grade}`;
-    const headline = `${callout} · ${primary.distanceMeters}m先 ${primary.directionJa}${primary.label}`;
-    const subline = hasChicane
-      ? `連続S字（次:${followOpposite.directionJa}${followOpposite.grade}） · 曲角 ${primary.absTurnDeg}° · 推定R ${primary.radiusMeters}m`
-      : `曲角 ${primary.absTurnDeg}° · 推定曲率半径 R≈${primary.radiusMeters}m`;
+  /**
+   * Determine whether the vehicle is driving ON an elevated highway/bridge ('elevated'),
+   * UNDER an overpass on a surface road ('underpass'), or on a regular surface road ('surface').
+   *
+   * Combines:
+   *  - Active route step classes (`motorway`, `bridge`) & Highway mode
+   *  - Rendered map features near ego position (`structure: 'bridge'`, `layer > 0`, bridge/viaduct layer IDs)
+   *  - Manual debug override (`forceUnderpass`)
+   */
+  function classifyElevationState({ modeId, activeStep, renderedFeatures, forceUnderpass }) {
+    if (forceUnderpass) {
+      return { state: 'underpass', hasBridgeOverhead: true, isHighwayRoute: false };
+    }
 
-    return {
-      ...primary,
-      callout,
-      hasChicane,
-      headline,
-      subline,
-    };
+    const isHighwayRoute =
+      modeId === 'highway' || Boolean(activeStep && activeStep.isMotorwayOrElevated);
+
+    let hasBridgeFeature = false;
+    if (Array.isArray(renderedFeatures)) {
+      for (let i = 0; i < renderedFeatures.length; i++) {
+        const f = renderedFeatures[i];
+        if (!f) continue;
+        const props = f.properties || {};
+        const layerId = (f.layer && f.layer.id) || '';
+        const structure = String(props.structure || '').toLowerCase();
+        const roadClass = String(props.class || '').toLowerCase();
+        const zLayer = Number(props.layer);
+
+        if (
+          structure === 'bridge' ||
+          (Number.isFinite(zLayer) && zLayer > 0) ||
+          /(bridge|elevated|viaduct|overpass)/i.test(layerId) ||
+          (roadClass === 'motorway' && modeId !== 'highway')
+        ) {
+          hasBridgeFeature = true;
+          break;
+        }
+      }
+    }
+
+    if (isHighwayRoute) {
+      return { state: 'elevated', hasBridgeOverhead: hasBridgeFeature, isHighwayRoute: true };
+    }
+
+    if (hasBridgeFeature) {
+      return { state: 'underpass', hasBridgeOverhead: true, isHighwayRoute: false };
+    }
+
+    return { state: 'surface', hasBridgeOverhead: false, isHighwayRoute: false };
   }
 
   /**
@@ -856,6 +902,8 @@
     computeSpeedAdaptiveZoom,
     computeTargetPitch,
     analyzeMountainPaceNote,
+    getActiveRouteStep,
+    classifyElevationState,
     advanceDeadReckoning,
     sliceRouteProgress,
   };

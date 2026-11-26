@@ -1,45 +1,46 @@
 /* ==========================================================================
-   Automotive OEM Minimal Digital Cockpit HUD
-   Inspired by Tesla / BMW / Mercedes-Benz production instrument clusters
-   Landscape-first responsive architecture
+   OEM Minimal Digital Cockpit HUD
+   Left Edge: Tesla-style Speed + Next Guidance Panel
+   Right Edge: Slim 1-Column 4-Item Dock (Clock / Mode / Menu / Recenter)
+   Top Center: Mountain Mode Initial-D Curve Icon Only
    ========================================================================== */
 
 :root {
-  /* OEM Matte Dark Glass Surfaces */
   --bg-void: #0b0c10;
   --surface-glass: rgba(18, 18, 22, 0.78);
-  --surface-glass-strong: rgba(18, 18, 22, 0.90);
+  --surface-glass-strong: rgba(18, 18, 22, 0.92);
   --surface-control: rgba(255, 255, 255, 0.06);
-  --surface-control-hover: rgba(255, 255, 255, 0.11);
+  --surface-control-hover: rgba(255, 255, 255, 0.12);
 
-  /* Subtle Hairline Borders */
   --border-hairline: 1px solid rgba(255, 255, 255, 0.1);
-  --border-subtle-color: rgba(255, 255, 255, 0.1);
-  --border-strong-color: rgba(255, 255, 255, 0.2);
+  --border-strong-color: rgba(255, 255, 255, 0.22);
 
-  /* Unified Automotive Blue Accent + Functional Semantic Colors */
   --accent-blue: #3b82f6;
   --accent-blue-deep: #2563eb;
   --accent-blue-soft: rgba(59, 130, 246, 0.16);
+
+  --tier-easy: #22c55e;
+  --tier-medium: #facc15;
+  --tier-hard: #f97316;
+  --tier-hairpin: #ef4444;
+
   --status-green: #22c55e;
   --status-amber: #f59e0b;
-  --status-orange: #f97316;
   --status-red: #ef4444;
 
-  /* Typography */
   --text-primary: #f8fafc;
   --text-secondary: #a1a8b8;
   --text-muted: #6e7585;
 
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Noto Sans JP', 'Segoe UI', sans-serif;
 
-  /* Layout Tokens */
   --safe-left: max(12px, env(safe-area-inset-left));
   --safe-right: max(12px, env(safe-area-inset-right));
   --safe-top: max(12px, env(safe-area-inset-top));
   --safe-bottom: max(12px, env(safe-area-inset-bottom));
 
-  --left-rail-w: clamp(192px, 22vw, 244px);
+  --left-panel-w: clamp(210px, 26vw, 272px);
+  --right-dock-w: 68px;
   --radius-sm: 8px;
   --radius-md: 12px;
   --blur-hud: blur(16px);
@@ -97,32 +98,22 @@ body {
   z-index: 1;
 }
 
-/* Clean, minimal top readability fade (no cyberpunk vignettes) */
-.hud-scrim {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  pointer-events: none;
-  background: linear-gradient(180deg, rgba(10, 11, 15, 0.42) 0%, rgba(10, 11, 15, 0) 20%);
-}
-
-/* Mapbox Attribution tucked cleanly */
 .mapboxgl-ctrl-bottom-left {
-  left: calc(var(--safe-left) + var(--left-rail-w) + 12px) !important;
+  left: calc(var(--safe-left) + var(--left-panel-w) + 12px) !important;
   bottom: 4px !important;
-  opacity: 0.55;
-  transform: scale(0.85);
+  opacity: 0.5;
+  transform: scale(0.84);
   transform-origin: bottom left;
 }
 
 .mapboxgl-ctrl-bottom-right {
   bottom: 4px !important;
-  right: var(--safe-right) !important;
-  opacity: 0.55;
+  right: calc(var(--safe-right) + var(--right-dock-w) + 10px) !important;
+  opacity: 0.5;
 }
 
 .mapboxgl-ctrl-attrib {
-  background: rgba(15, 15, 20, 0.65) !important;
+  background: rgba(18, 18, 22, 0.65) !important;
   color: var(--text-muted) !important;
   font-size: 10px !important;
 }
@@ -132,7 +123,7 @@ body {
 }
 
 /* ==========================================================================
-   Unified OEM Glass Panel Surface
+   Unified OEM Frosted Dark Surface
    ========================================================================== */
 
 .hud-panel {
@@ -145,62 +136,31 @@ body {
 }
 
 /* ==========================================================================
-   LEFT INSTRUMENT CLUSTER: OEM Minimal Speedometer + GPS + Destination
+   LEFT EDGE: Tesla-Style Unified Cockpit Panel (Speed + Status + Next Turn)
    ========================================================================== */
 
-.left-cluster {
+.tesla-left-panel {
   position: absolute;
   top: var(--safe-top);
   left: var(--safe-left);
-  width: var(--left-rail-w);
+  width: var(--left-panel-w);
   max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom));
   z-index: 20;
+  padding: 14px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+}
+
+/* --- Upper Block: Speedometer & Status Badges --- */
+.tesla-speed-block {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  pointer-events: none;
 }
 
-.left-cluster > * {
-  pointer-events: auto;
-}
-
-/* --- Minimal OEM Speedometer Card --- */
-.speed-card {
-  padding: 14px 16px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.speed-header-row {
-  width: 100%;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  min-height: 18px;
-}
-
-.cockpit-brand {
-  margin: 0;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  text-transform: uppercase;
-}
-
-.demo-chip {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: var(--accent-blue-soft);
-  color: #93c5fd;
-}
-
-.speed-main-display {
+.speed-row {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -208,25 +168,37 @@ body {
 }
 
 .speed-value {
-  font-size: clamp(2.8rem, 11dvh, 4.1rem);
+  font-size: clamp(2.85rem, 12dvh, 4.2rem);
   font-weight: 600;
-  line-height: 0.95;
+  line-height: 0.94;
   letter-spacing: -0.03em;
   font-variant-numeric: tabular-nums;
   color: var(--text-primary);
+}
+
+.speed-right-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
 }
 
 .speed-unit {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-secondary);
-  letter-spacing: 0.02em;
 }
 
-/* Clean flat Tesla/BMW style horizontal speed bar */
+.heading-mini {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .speed-bar-track {
   width: 100%;
-  height: 4px;
+  height: 3.5px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.1);
   overflow: hidden;
@@ -240,191 +212,362 @@ body {
   transition: width 0.12s linear;
 }
 
-.telemetry-strip {
-  width: 100%;
-  padding-top: 9px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.telemetry-cell {
+.status-badges-row {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
 }
 
-.telemetry-label {
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-}
-
-.telemetry-val {
-  font-size: 12.5px;
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10.5px;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-secondary);
   white-space: nowrap;
+}
+
+.status-pill.mode-pill {
+  background: var(--accent-blue-soft);
+  color: #93c5fd;
+}
+
+.status-pill.gps-online {
   color: var(--text-primary);
 }
 
-/* --- Positioning Status Card (GPS ONLINE vs DEAD RECKONING) --- */
-.gps-status-card {
-  padding: 9px 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.status-pill.gps-dr {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fcd34d;
 }
 
-.gps-dot {
-  width: 8px;
-  height: 8px;
+.status-pill.elev-up {
+  background: rgba(59, 130, 246, 0.2);
+  color: #bfdbfe;
+}
+
+.status-pill.elev-under {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fde68a;
+}
+
+.status-dot {
+  width: 6.5px;
+  height: 6.5px;
   border-radius: 50%;
-  flex-shrink: 0;
   background: var(--text-muted);
+  flex-shrink: 0;
 }
 
-.gps-status-card.status-online .gps-dot {
+.gps-online .status-dot {
   background: var(--status-green);
 }
 
-.gps-status-card.status-dr .gps-dot {
+.gps-dr .status-dot {
   background: var(--status-amber);
 }
 
-.gps-status-card.status-acquiring .gps-dot {
+.gps-standby .status-dot {
   background: var(--accent-blue);
 }
 
-.gps-status-card.status-dr {
-  background: rgba(24, 19, 12, 0.84);
-  border-color: rgba(245, 158, 11, 0.35);
-}
-
-.gps-info {
-  min-width: 0;
-  flex: 1;
-}
-
-.gps-primary {
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  line-height: 1.2;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.status-dr .gps-primary {
-  color: #fbbf24;
-}
-
-.gps-secondary {
-  font-size: 11px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-top: 2px;
-}
-
-/* --- Collapsible Destination Trigger Pill --- */
-.dest-trigger-btn {
+/* --- Divider --- */
+.tesla-divider {
   width: 100%;
-  min-height: 46px;
-  padding: 9px 12px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+/* --- Lower Block: Next Turn / IC-JCT Guidance --- */
+.tesla-guidance-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.next-turn-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  color: var(--text-primary);
-  cursor: pointer;
-  text-align: left;
-  transition: background-color 0.18s ease, border-color 0.18s ease;
+  gap: 11px;
 }
 
-.dest-trigger-btn:hover {
-  background: var(--surface-glass-strong);
-  border-color: var(--border-strong-color);
-}
-
-.dest-trigger-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: var(--surface-control);
-  color: var(--accent-blue);
+.maneuver-icon-box {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  background: var(--accent-blue-deep);
+  color: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
 }
 
-.dest-trigger-text {
+.next-turn-metrics {
   min-width: 0;
   flex: 1;
-  overflow: hidden;
 }
 
-.dest-trigger-title {
-  display: block;
-  font-size: 12.5px;
-  font-weight: 600;
+.next-turn-dist-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.guidance-distance {
+  font-size: clamp(1.25rem, 3.2vw, 1.55rem);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
   color: var(--text-primary);
+  line-height: 1.05;
+  white-space: nowrap;
+}
+
+.zoom-active-pill {
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--accent-blue-deep);
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.guidance-tag {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-top: 2px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.dest-trigger-meta {
-  display: block;
+.guidance-instruction {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.route-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
   font-size: 11px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
+}
+
+.route-summary-name {
+  min-width: 0;
+  flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 1px;
+  color: var(--text-secondary);
 }
 
-.dest-chevron {
-  color: var(--text-muted);
-  transition: transform 0.2s ease;
-  flex-shrink: 0;
+.route-summary-eta {
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
-.dest-trigger-btn[aria-expanded="true"] .dest-chevron {
-  transform: rotate(180deg);
+/* ==========================================================================
+   TOP-CENTER: Mountain Mode Initial-D Arcade Style Simple Curve Icon ONLY
+   ========================================================================== */
+
+.mountain-curve-zone {
+  position: absolute;
+  top: var(--safe-top);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  pointer-events: none;
+}
+
+.initiald-curve-card {
+  padding: 10px 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 126px;
+  background: rgba(18, 18, 22, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius-md);
+  backdrop-filter: var(--blur-hud);
+  -webkit-backdrop-filter: var(--blur-hud);
+  box-shadow: var(--shadow-hud);
+  animation: curvePop 0.2s ease-out;
+}
+
+@keyframes curvePop {
+  0% { transform: scale(0.92); opacity: 0.4; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.initiald-arrow-box {
+  width: 58px;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.initiald-rank-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.initiald-curve-card.tier-EASY .initiald-arrow-box,
+.initiald-curve-card.tier-EASY .initiald-rank-label {
+  color: var(--tier-easy);
+}
+
+.initiald-curve-card.tier-MEDIUM .initiald-arrow-box,
+.initiald-curve-card.tier-MEDIUM .initiald-rank-label {
+  color: var(--tier-medium);
+}
+
+.initiald-curve-card.tier-HARD .initiald-arrow-box,
+.initiald-curve-card.tier-HARD .initiald-rank-label {
+  color: var(--tier-hard);
+}
+
+.initiald-curve-card.tier-HAIRPIN .initiald-arrow-box,
+.initiald-curve-card.tier-HAIRPIN .initiald-rank-label {
+  color: var(--tier-hairpin);
+}
+
+.initiald-dir-label {
   color: var(--text-primary);
 }
 
 /* ==========================================================================
-   EXPANDABLE DESTINATION SEARCH DRAWER
+   RIGHT EDGE: Slim 1-Column Vertical Dock (STRICTLY 4 ITEMS)
+   1. Clock (non-button)  2. Mode Cycle  3. Menu  4. Recenter Ego
    ========================================================================== */
 
-.search-drawer {
+.right-slim-dock {
+  position: absolute;
+  top: var(--safe-top);
+  right: var(--safe-right);
+  width: var(--right-dock-w);
+  z-index: 25;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.dock-clock {
+  padding: 8px 4px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  margin-bottom: 2px;
+}
+
+.dock-btn {
+  width: 100%;
+  min-height: 54px;
+  padding: 6px 4px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: var(--surface-control);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.dock-btn:hover {
+  background: var(--surface-control-hover);
+  color: var(--text-primary);
+}
+
+.dock-btn.active {
+  background: var(--accent-blue-deep);
+  color: #ffffff;
+}
+
+.dock-btn.attention {
+  background: rgba(245, 158, 11, 0.22);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fcd34d;
+}
+
+.dock-btn-label {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   HIDDEN SLIDE-OUT MENU DRAWER (Search + Demo + Underpass + Settings)
+   ========================================================================== */
+
+.menu-drawer {
   position: absolute;
   top: var(--safe-top);
   bottom: var(--safe-bottom);
-  left: calc(var(--safe-left) + var(--left-rail-w) + 10px);
-  width: min(344px, calc(100vw - var(--left-rail-w) - 120px));
-  z-index: 30;
+  right: calc(var(--safe-right) + var(--right-dock-w) + 10px);
+  width: min(330px, calc(100vw - var(--left-panel-w) - var(--right-dock-w) - 42px));
+  z-index: 35;
   padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
   background: var(--surface-glass-strong);
+  overflow-y: auto;
   transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
-.search-drawer.collapsed {
+.menu-drawer.collapsed {
   opacity: 0;
   pointer-events: none;
-  transform: translateX(-10px);
+  transform: translateX(14px);
+}
+
+.menu-drawer::-webkit-scrollbar {
+  width: 4px;
+}
+
+.menu-drawer::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
 }
 
 .drawer-head {
@@ -437,10 +580,10 @@ body {
 .drawer-title {
   font-size: 13.5px;
   font-weight: 600;
+  color: var(--text-primary);
   display: flex;
   align-items: center;
   gap: 7px;
-  color: var(--text-primary);
 }
 
 .icon-btn {
@@ -454,12 +597,29 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background-color 0.16s ease, color 0.16s ease;
 }
 
 .icon-btn:hover {
   background: var(--surface-control-hover);
   color: var(--text-primary);
+}
+
+.control-group {
+  padding: 10px 11px;
+  border-radius: var(--radius-sm);
+  border: var(--border-hairline);
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-caption {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  text-transform: uppercase;
 }
 
 .search-form {
@@ -470,18 +630,17 @@ body {
 .search-input {
   flex: 1;
   min-width: 0;
-  height: 38px;
-  padding: 0 12px;
+  height: 36px;
+  padding: 0 11px;
   border-radius: var(--radius-sm);
   border: var(--border-hairline);
   background: rgba(255, 255, 255, 0.05);
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 12.5px;
   outline: none;
   user-select: text;
   -webkit-user-select: text;
-  transition: border-color 0.16s ease;
 }
 
 .search-input::placeholder {
@@ -493,18 +652,17 @@ body {
 }
 
 .btn-primary {
-  height: 38px;
-  padding: 0 14px;
+  height: 36px;
+  padding: 0 13px;
   border-radius: var(--radius-sm);
   border: none;
   background: var(--accent-blue-deep);
   color: #ffffff;
   font-family: var(--font-sans);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color 0.16s ease;
 }
 
 .btn-primary:hover {
@@ -512,21 +670,20 @@ body {
 }
 
 .btn-ghost {
-  height: 34px;
-  padding: 0 11px;
+  height: 32px;
+  padding: 0 10px;
   border-radius: var(--radius-sm);
   border: var(--border-hairline);
   background: var(--surface-control);
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+  gap: 5px;
 }
 
 .btn-ghost:hover {
@@ -540,6 +697,12 @@ body {
   color: #ffffff;
 }
 
+.btn-ghost.wake-on {
+  background: rgba(34, 197, 94, 0.16);
+  border-color: rgba(34, 197, 94, 0.35);
+  color: #86efac;
+}
+
 .btn-danger {
   color: #fca5a5;
 }
@@ -550,60 +713,23 @@ body {
   color: #ffffff;
 }
 
-.search-actions-row {
-  display: flex;
-  gap: 6px;
-}
-
-.search-actions-row .btn-ghost {
-  flex: 1;
-}
-
-.search-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-right: 2px;
-}
-
-.search-scroll::-webkit-scrollbar {
-  width: 4px;
-}
-
-.search-scroll::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
-  border-radius: 4px;
-}
-
-.section-caption {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-  text-transform: uppercase;
-}
-
 .search-results-list,
 .preset-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 
 .search-result-item,
 .preset-card {
   width: 100%;
-  padding: 9px 11px;
+  padding: 8px 10px;
   border-radius: var(--radius-sm);
   border: var(--border-hairline);
   background: var(--surface-control);
   color: var(--text-primary);
   text-align: left;
   cursor: pointer;
-  transition: background-color 0.16s ease, border-color 0.16s ease;
 }
 
 .preset-card {
@@ -627,14 +753,14 @@ body {
 
 .search-result-name,
 .preset-name {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .search-result-addr,
 .preset-desc {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-secondary);
   margin-top: 2px;
   white-space: nowrap;
@@ -645,410 +771,12 @@ body {
 .preset-badge {
   font-size: 10px;
   font-weight: 600;
-  padding: 3px 7px;
+  padding: 2px 7px;
   border-radius: 6px;
   background: var(--accent-blue-soft);
   color: #93c5fd;
   white-space: nowrap;
-}
-
-.map-hint-note {
-  font-size: 11px;
-  color: var(--text-muted);
-  line-height: 1.5;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-/* ==========================================================================
-   TOP-CENTER GUIDANCE BANNER (OEM Turn-by-Turn / Highway IC-JCT / Pace Note)
-   ========================================================================== */
-
-.top-guidance-zone {
-  position: absolute;
-  top: var(--safe-top);
-  left: calc(var(--safe-left) + var(--left-rail-w) + 12px);
-  right: calc(var(--safe-right) + 272px);
-  max-width: 450px;
-  margin: 0 auto;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  pointer-events: none;
-}
-
-.top-guidance-zone > * {
-  pointer-events: auto;
-}
-
-.guidance-banner {
-  width: 100%;
-  padding: 11px 14px;
-  display: flex;
-  align-items: center;
-  gap: 13px;
-}
-
-.maneuver-icon-box {
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-  background: var(--accent-blue-deep);
-  color: #ffffff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   flex-shrink: 0;
-}
-
-.guidance-body {
-  min-width: 0;
-  flex: 1;
-}
-
-.guidance-top-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: nowrap;
-}
-
-.guidance-distance {
-  font-size: clamp(1.3rem, 2.8vw, 1.65rem);
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-  color: var(--text-primary);
-  line-height: 1.05;
-  white-space: nowrap;
-}
-
-.guidance-tag {
-  font-size: 10.5px;
-  font-weight: 600;
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.09);
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.jct-badge {
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 6px;
-  background: var(--accent-blue-deep);
-  color: #ffffff;
-  white-space: nowrap;
-}
-
-.guidance-instruction {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-top: 3px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.guidance-sub {
-  font-size: 11.5px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* --- Mountain Mode Rally Pace Note Card (Clean OEM Matte Style) --- */
-.pace-note-banner {
-  width: 100%;
-  padding: 11px 14px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: var(--surface-glass-strong);
-  border-left-width: 4px;
-  transition: transform 0.2s ease, opacity 0.2s ease;
-}
-
-.pace-note-banner.pace-pop {
-  animation: paceFadeIn 0.22s ease-out;
-}
-
-@keyframes paceFadeIn {
-  0% { transform: translateY(-6px); opacity: 0.4; }
-  100% { transform: translateY(0); opacity: 1; }
-}
-
-.pace-note-banner.grade-R1 { border-left-color: var(--status-red); }
-.pace-note-banner.grade-R2 { border-left-color: var(--status-orange); }
-.pace-note-banner.grade-R3 { border-left-color: var(--status-amber); }
-.pace-note-banner.grade-R4 { border-left-color: var(--accent-blue); }
-
-.pace-icon-box {
-  width: 48px;
-  height: 48px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.grade-R1 .pace-icon-box { color: var(--status-red); background: rgba(239, 68, 68, 0.14); }
-.grade-R2 .pace-icon-box { color: var(--status-orange); background: rgba(249, 115, 22, 0.14); }
-.grade-R3 .pace-icon-box { color: var(--status-amber); background: rgba(245, 158, 11, 0.14); }
-.grade-R4 .pace-icon-box { color: var(--accent-blue); background: var(--accent-blue-soft); }
-
-.pace-grade-pill {
-  font-size: 11.5px;
-  font-weight: 700;
-  padding: 2px 7px;
-  border-radius: 6px;
-  font-variant-numeric: tabular-nums;
-}
-
-.grade-R1 .pace-grade-pill { background: var(--status-red); color: #ffffff; }
-.grade-R2 .pace-grade-pill { background: var(--status-orange); color: #ffffff; }
-.grade-R3 .pace-grade-pill { background: var(--status-amber); color: #111318; }
-.grade-R4 .pace-grade-pill { background: var(--accent-blue-deep); color: #ffffff; }
-
-.pace-text-wrap {
-  min-width: 0;
-  flex: 1;
-}
-
-.pace-header-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 3px;
-}
-
-.pace-kicker {
-  font-size: 10.5px;
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
-.pace-headline {
-  font-size: clamp(14px, 2vw, 16.5px);
-  font-weight: 700;
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.pace-subline {
-  font-size: 11px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.mountain-clear-pill {
-  padding: 7px 14px;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11.5px;
-  color: var(--text-secondary);
-}
-
-.mountain-clear-pill strong {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-/* ==========================================================================
-   RIGHT CONTROLS: Utility Bar & 3-Mode Selector
-   ========================================================================== */
-
-.right-hud {
-  position: absolute;
-  top: var(--safe-top);
-  right: var(--safe-right);
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  pointer-events: none;
-}
-
-.right-hud > * {
-  pointer-events: auto;
-}
-
-.utility-bar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px;
-}
-
-.util-btn {
-  height: 32px;
-  padding: 0 9px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 500;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
-  transition: background-color 0.16s ease, color 0.16s ease;
-  white-space: nowrap;
-}
-
-.util-btn:hover {
-  background: var(--surface-control-hover);
-  color: var(--text-primary);
-}
-
-.util-btn.active {
-  background: var(--accent-blue-deep);
-  color: #ffffff;
-}
-
-.util-btn.wake-on {
-  background: rgba(34, 197, 94, 0.16);
-  color: #86efac;
-}
-
-.util-btn.attention {
-  background: rgba(245, 158, 11, 0.2);
-  color: #fcd34d;
-}
-
-/* --- Mode Switcher Vertical Rail --- */
-.mode-switcher {
-  padding: 5px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 116px;
-}
-
-.mode-btn {
-  width: 100%;
-  min-height: 44px;
-  padding: 7px 10px;
-  border-radius: 8px;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  text-align: left;
-  transition: background-color 0.16s ease, color 0.16s ease;
-}
-
-.mode-btn:hover {
-  background: var(--surface-control);
-  color: var(--text-primary);
-}
-
-.mode-btn.active {
-  background: var(--accent-blue-deep);
-  color: #ffffff;
-}
-
-.mode-btn-icon {
-  color: inherit;
-  flex-shrink: 0;
-  opacity: 0.85;
-}
-
-.mode-btn.active .mode-btn-icon {
-  opacity: 1;
-}
-
-.mode-btn-labels {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.2;
-}
-
-.mode-btn-ja {
-  font-size: 12.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.mode-btn-en {
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  margin-top: 1px;
-}
-
-.mode-btn.active .mode-btn-en {
-  color: rgba(255, 255, 255, 0.78);
-}
-
-/* ==========================================================================
-   COLLAPSIBLE DEBUG & SIMULATION DRAWER
-   ========================================================================== */
-
-.debug-drawer {
-  position: absolute;
-  top: calc(var(--safe-top) + 48px);
-  right: calc(var(--safe-right) + 124px);
-  bottom: var(--safe-bottom);
-  width: min(304px, calc(100vw - var(--left-rail-w) - 156px));
-  z-index: 35;
-  padding: 13px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: var(--surface-glass-strong);
-  overflow-y: auto;
-  transition: opacity 0.2s ease, transform 0.2s ease;
-}
-
-.debug-drawer.collapsed {
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(12px);
-}
-
-.debug-drawer::-webkit-scrollbar {
-  width: 4px;
-}
-
-.debug-drawer::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
-  border-radius: 4px;
-}
-
-.control-group {
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  border: var(--border-hairline);
-  background: rgba(255, 255, 255, 0.03);
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
 }
 
 .toggle-row {
@@ -1063,23 +791,22 @@ body {
 }
 
 .toggle-title {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .toggle-desc {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-secondary);
-  margin-top: 2px;
+  margin-top: 1px;
 }
 
-/* Clean OEM Toggle Switch (iOS / Tesla Style) */
 .switch {
   position: relative;
   display: inline-block;
-  width: 44px;
-  height: 24px;
+  width: 42px;
+  height: 23px;
   flex-shrink: 0;
 }
 
@@ -1095,7 +822,7 @@ body {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.16);
   cursor: pointer;
-  transition: background-color 0.2s ease;
+  transition: background-color 0.18s ease;
 }
 
 .switch-track::after {
@@ -1103,11 +830,11 @@ body {
   position: absolute;
   top: 3px;
   left: 3px;
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
   border-radius: 50%;
   background: #ffffff;
-  transition: transform 0.2s ease;
+  transition: transform 0.18s ease;
 }
 
 .switch input:checked + .switch-track {
@@ -1115,14 +842,13 @@ body {
 }
 
 .switch input:checked + .switch-track::after {
-  transform: translateX(20px);
+  transform: translateX(19px);
 }
 
 .switch.switch-amber input:checked + .switch-track {
   background: var(--status-amber);
 }
 
-/* Speed Slider */
 .slider-head {
   display: flex;
   justify-content: space-between;
@@ -1130,7 +856,7 @@ body {
 }
 
 .slider-val {
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
@@ -1165,17 +891,16 @@ body {
 }
 
 .speed-chip-btn {
-  height: 28px;
+  height: 26px;
   border-radius: 6px;
   border: var(--border-hairline);
   background: var(--surface-control);
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 .speed-chip-btn:hover {
@@ -1183,11 +908,17 @@ body {
   color: var(--text-primary);
 }
 
+.utility-grid-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
 .debug-telemetry-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px 10px;
-  font-size: 11px;
+  gap: 5px 10px;
+  font-size: 10.5px;
 }
 
 .debug-kv {
@@ -1203,6 +934,12 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.map-hint-note {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
 /* ==========================================================================
    BOTTOM-CENTER MAP PIN CONFIRMATION & TOASTS
    ========================================================================== */
@@ -1212,12 +949,12 @@ body {
   bottom: calc(var(--safe-bottom) + 6px);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 25;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  max-width: min(440px, calc(100vw - var(--left-rail-w) - 48px));
+  max-width: min(420px, calc(100vw - var(--left-panel-w) - var(--right-dock-w) - 36px));
   pointer-events: none;
 }
 
@@ -1226,7 +963,7 @@ body {
 }
 
 .pin-confirm-bar {
-  padding: 10px 12px;
+  padding: 9px 12px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1239,7 +976,7 @@ body {
 }
 
 .pin-confirm-title {
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
@@ -1248,7 +985,7 @@ body {
 }
 
 .pin-confirm-coords {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
@@ -1283,34 +1020,7 @@ body {
   color: #fecaca;
 }
 
-/* ==========================================================================
-   OEM EGO VEHICLE PUCK & DESTINATION MARKER (Mapbox DOM Markers)
-   ========================================================================== */
-
-.ego-vehicle-marker {
-  width: 56px;
-  height: 56px;
-  pointer-events: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.ego-vehicle-marker svg {
-  width: 56px;
-  height: 56px;
-  overflow: visible;
-}
-
-.ego-vehicle-marker .ego-fill {
-  fill: #3b82f6;
-  transition: fill 0.25s ease;
-}
-
-.ego-vehicle-marker.is-dr .ego-fill {
-  fill: #f59e0b;
-}
-
+/* Destination Marker Pin */
 .dest-pin-marker {
   width: 28px;
   height: 28px;
@@ -1340,7 +1050,7 @@ body {
 }
 
 /* ==========================================================================
-   MAPBOX ACCESS TOKEN SETUP MODAL
+   MAPBOX ACCESS TOKEN MODAL & PORTRAIT ADVISORY
    ========================================================================== */
 
 .modal-backdrop {
@@ -1361,7 +1071,7 @@ body {
   max-height: calc(100dvh - 28px);
   overflow-y: auto;
   padding: 22px 24px;
-  background: rgba(15, 15, 20, 0.96);
+  background: rgba(18, 18, 22, 0.96);
   border: var(--border-hairline);
   border-radius: var(--radius-md);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
@@ -1406,10 +1116,6 @@ body {
   text-decoration: none;
 }
 
-.modal-desc a:hover {
-  text-decoration: underline;
-}
-
 .token-input-group {
   display: flex;
   flex-direction: column;
@@ -1452,10 +1158,6 @@ body {
   justify-content: flex-end;
   gap: 8px;
 }
-
-/* ==========================================================================
-   PORTRAIT ORIENTATION ADVISORY OVERLAY
-   ========================================================================== */
 
 .portrait-overlay {
   display: none;
@@ -1512,74 +1214,41 @@ body {
 
 @media (max-height: 450px) {
   :root {
-    --left-rail-w: clamp(178px, 22vw, 212px);
+    --left-panel-w: clamp(196px, 25vw, 236px);
+    --right-dock-w: 62px;
   }
 
-  .left-cluster {
-    gap: 6px;
-  }
-
-  .speed-card {
-    padding: 10px 12px 9px;
-    gap: 7px;
+  .tesla-left-panel {
+    padding: 10px 12px;
+    gap: 8px;
   }
 
   .speed-value {
-    font-size: clamp(2.35rem, 11.5dvh, 3.1rem);
-  }
-
-  .telemetry-strip {
-    padding-top: 7px;
-  }
-
-  .gps-status-card {
-    padding: 7px 10px;
-  }
-
-  .dest-trigger-btn {
-    min-height: 40px;
-    padding: 7px 10px;
-  }
-
-  .top-guidance-zone {
-    left: calc(var(--safe-left) + var(--left-rail-w) + 10px);
-    right: calc(var(--safe-right) + 206px);
-  }
-
-  .guidance-banner,
-  .pace-note-banner {
-    padding: 8px 11px;
-    gap: 10px;
+    font-size: clamp(2.4rem, 11.5dvh, 3.1rem);
   }
 
   .maneuver-icon-box {
-    width: 38px;
-    height: 38px;
+    width: 36px;
+    height: 36px;
   }
 
-  .pace-icon-box {
-    width: 42px;
-    height: 42px;
+  .dock-clock {
+    padding: 5px 2px;
+    font-size: 12.5px;
   }
 
-  .mode-switcher {
-    width: 110px;
-    gap: 3px;
-    padding: 4px;
+  .dock-btn {
+    min-height: 46px;
+    padding: 4px 2px;
   }
 
-  .mode-btn {
-    min-height: 38px;
-    padding: 5px 8px;
+  .initiald-curve-card {
+    padding: 7px 14px;
+    min-width: 112px;
   }
 
-  .util-btn {
-    height: 28px;
-    padding: 0 7px;
-    font-size: 10.5px;
-  }
-
-  .util-btn .util-label-hide-sm {
-    display: none;
+  .initiald-arrow-box {
+    width: 46px;
+    height: 46px;
   }
 }

@@ -1,12 +1,20 @@
 /**
- * AERO-DRIVE 3D Digital Cockpit — Refactored Application Controller
- * Mapbox GL JS v3 (Standard Style) + Geocoding & Directions API + Turf.js v6
+ * AERO-DRIVE 3D Digital Cockpit — Application Controller
+ *
+ * Stack:
+ *  - Mapbox GL JS v3 (mapbox://styles/mapbox/standard, night lightPreset, 3D objects)
+ *  - Three.js Custom WebGL 3D Car Layer (js/car3d-layer.js)
+ *  - Turf.js v6 (js/geometry.js)
+ *  - Mapbox Geocoding API + Directions API (mapbox/driving) + Screen Wake Lock API
  */
 (function () {
   'use strict';
 
   const Geo = window.NaviGeometry;
   const CFG = window.APP_CONFIG;
+  const MODE_ORDER = ['city', 'highway', 'mountain'];
+  const ELEVATED_Z_OFFSET_M = 8.0;
+  const UNDERPASS_OPACITY = 0.22;
 
   // =========================================================================
   // Application State
@@ -24,6 +32,27 @@
     isCloseZoomActive: false,
     closeZoomStep: null,
     lastManeuverDirectDistM: Infinity,
+
+    // Overpass ("上") vs Underpass ("下") Elevation & See-Through Manager
+    elevation: {
+      state: 'surface', // 'surface' | 'elevated' | 'underpass'
+      hasBridgeOverhead: false,
+      isHighwayRoute: false,
+      lastCheckTs: 0,
+      targetZOffsetM: 0,
+      currentCarAltitudeM: 0,
+      show3dObjectsApplied: true,
+      dimmedBridgeLayers: new Map(),
+    },
+
+    // Mountain Mode Initial-D Curve Warning State (500ms throttle + 2.5s lock)
+    mountainCurve: {
+      lastEvalTs: 0,
+      lockedUntilTs: 0,
+      displayed: null,
+      evalIntervalMs: 500,
+      lockDurationMs: 2500,
+    },
 
     // Camera tracking & dirty-check snapshot (prevents jumpTo spam when idle)
     followCamera: true,
@@ -65,12 +94,9 @@
     routeModel: null,
     destination: null, // { name, coords }
     navProgress: null,
-    activePaceNote: null,
-    lastPaceHeadline: '',
 
-    // Map markers & interactions
-    egoMarker: null,
-    egoMarkerEl: null,
+    // 3D Car Layer & Destination Pin Markers
+    car3d: null,
     destMarker: null,
     pinModeActive: false,
     pendingPin: null,
@@ -82,6 +108,7 @@
       demoSpeedKmh: 60,
       tunnelLost: false,
       forceCloseZoom: false,
+      forceUnderpassSeeThrough: false,
       lockedTunnelSpeedMps: null,
     },
 
@@ -93,8 +120,7 @@
     },
 
     // UI state
-    searchOpen: false,
-    debugOpen: false,
+    menuOpen: false,
     lastFrameTs: 0,
     lastSliceUpdateTs: 0,
     toastTimer: null,
@@ -107,22 +133,43 @@
 
   const dom = {
     app: $('cockpit-app'),
+
+    // Left Edge: Tesla-style Unified Panel
+    teslaLeftPanel: $('tesla-left-panel'),
     speedValue: $('speed-value'),
     speedBarFill: $('speed-bar-fill'),
     headingVal: $('heading-val'),
-    altModeVal: $('alt-mode-val'),
+    modeStatusPill: $('mode-status-pill'),
+    gpsStatusPill: $('gps-status-pill'),
+    gpsPrimaryLabel: $('gps-primary-label'),
+    elevationStatusPill: $('elevation-status-pill'),
     demoActiveChip: $('demo-active-chip'),
 
-    gpsCard: $('gps-status-card'),
-    gpsPrimary: $('gps-primary-label'),
-    gpsSecondary: $('gps-secondary-label'),
+    maneuverIconBox: $('maneuver-icon-box'),
+    guidanceDistance: $('guidance-distance'),
+    zoomActivePill: $('zoom-active-pill'),
+    guidanceTag: $('guidance-tag'),
+    guidanceInstruction: $('guidance-instruction'),
+    routeDestName: $('route-dest-name'),
+    routeEtaVal: $('route-eta-val'),
 
-    btnDestToggle: $('btn-dest-toggle'),
-    destTriggerTitle: $('dest-trigger-title'),
-    destTriggerMeta: $('dest-trigger-meta'),
+    // Top-Center: Mountain Initial-D Curve Card
+    initialdCurveCard: $('initiald-curve-card'),
+    initialdArrowBox: $('initiald-arrow-box'),
+    initialdDirLabel: $('initiald-dir-label'),
+    initialdRankLabel: $('initiald-rank-label'),
 
-    searchDrawer: $('search-drawer'),
-    btnSearchClose: $('btn-search-close'),
+    // Right Edge: Slim 4-Item Dock
+    dockClock: $('dock-clock'),
+    btnModeCycle: $('btn-mode-cycle'),
+    modeCycleIcon: $('mode-cycle-icon'),
+    modeCycleLabel: $('mode-cycle-label'),
+    btnMenuToggle: $('btn-menu-toggle'),
+    btnRecenter: $('btn-recenter'),
+
+    // Hidden Slide-Out Menu Drawer
+    menuDrawer: $('menu-drawer'),
+    btnMenuClose: $('btn-menu-close'),
     searchForm: $('search-form'),
     searchInput: $('search-input'),
     btnMapPinMode: $('btn-map-pin-mode'),
@@ -131,50 +178,28 @@
     searchResultsList: $('search-results-list'),
     presetList: $('preset-list'),
 
-    guidanceBanner: $('guidance-banner'),
-    maneuverIconBox: $('maneuver-icon-box'),
-    guidanceDistance: $('guidance-distance'),
-    guidanceTag: $('guidance-tag'),
-    jctZoomBadge: $('jct-zoom-badge'),
-    guidanceInstruction: $('guidance-instruction'),
-    guidanceSub: $('guidance-sub'),
-
-    paceNoteBanner: $('pace-note-banner'),
-    paceIconBox: $('pace-icon-box'),
-    paceGradePill: $('pace-grade-pill'),
-    paceKicker: $('pace-kicker'),
-    paceHeadline: $('pace-headline'),
-    paceSubline: $('pace-subline'),
-    mountainClearPill: $('mountain-clear-pill'),
-    mountainStatusText: $('mountain-status-text'),
-
-    btnWakelock: $('btn-wakelock'),
-    wakelockLabel: $('wakelock-label'),
-    btnRecenter: $('btn-recenter'),
-    btnFullscreen: $('btn-fullscreen'),
-    btnTokenSettings: $('btn-token-settings'),
-    btnDebugToggle: $('btn-debug-toggle'),
-
-    modeButtons: document.querySelectorAll('.mode-btn'),
-
-    debugDrawer: $('debug-drawer'),
-    btnDebugClose: $('btn-debug-close'),
     toggleDemoMode: $('toggle-demo-mode'),
     sliderDemoSpeed: $('slider-demo-speed'),
     demoSpeedLabel: $('demo-speed-label'),
     speedChipBtns: document.querySelectorAll('.speed-chip-btn'),
     btnDemoReset: $('btn-demo-reset'),
+    toggleUnderpassSeeThrough: $('toggle-underpass-see-through'),
     toggleForceCloseZoom: $('toggle-force-close-zoom'),
     toggleTunnelSim: $('toggle-tunnel-sim'),
-    debugPresetList: $('debug-preset-list'),
+
+    btnWakelock: $('btn-wakelock'),
+    wakelockLabel: $('wakelock-label'),
+    btnFullscreen: $('btn-fullscreen'),
+    btnTokenSettings: $('btn-token-settings'),
 
     dbgZoom: $('dbg-zoom'),
     dbgPitch: $('dbg-pitch'),
+    dbgElev: $('dbg-elev'),
     dbgAutoZoom: $('dbg-auto-zoom'),
     dbgDrMode: $('dbg-dr-mode'),
     dbgBranch: $('dbg-branch'),
-    dbgCurve: $('dbg-curve'),
 
+    // Pin Confirmation & Toast
     pinConfirmBar: $('pin-confirm-bar'),
     pinConfirmTitle: $('pin-confirm-title'),
     pinConfirmCoords: $('pin-confirm-coords'),
@@ -182,22 +207,40 @@
     btnPinCancel: $('btn-pin-cancel'),
     hudToast: $('hud-toast'),
 
+    // Token Modal & Portrait Advisory
     tokenModalBackdrop: $('token-modal-backdrop'),
     tokenInput: $('token-input'),
     tokenErrorMsg: $('token-error-msg'),
     btnTokenSave: $('btn-token-save'),
     btnTokenCancel: $('btn-token-cancel'),
     btnTokenClear: $('btn-token-clear'),
-
     btnAllowPortrait: $('btn-allow-portrait'),
   };
 
   // =========================================================================
-  // SVG Icon Library (Maneuvers & Rally Pace Notes)
+  // SVG Icon Library (Mode Dock / Turn Maneuvers / Initial-D Mountain Arrows)
   // =========================================================================
+  function getModeIconSvg(modeId) {
+    const common =
+      'width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+    if (modeId === 'highway') {
+      return `<svg ${common}><path d="M6 21 9 3M18 21 15 3M12 6v3M12 13v3M12 19v2"/></svg>`;
+    }
+    if (modeId === 'mountain') {
+      return `<svg ${common}><path d="m3 20 7-13 4 7 3-5 4 11H3Z"/></svg>`;
+    }
+    return `<svg ${common}><path d="M3 21h18M5 21V7l6-4v18M13 21V11l6-3v13M8 10h.01M8 14h.01M16 14h.01M16 17h.01"/></svg>`;
+  }
+
+  function getModeDockShortLabel(modeId) {
+    if (modeId === 'highway') return '高速';
+    if (modeId === 'mountain') return '山';
+    return '市街地';
+  }
+
   function getManeuverSvg(key) {
     const common =
-      'width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"';
+      'width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"';
     const map = {
       straight: `<svg ${common}><path d="M12 20V5"/><path d="m7 10 5-5 5 5"/></svg>`,
       left: `<svg ${common}><path d="M16 20v-7a3 3 0 0 0-3-3H6"/><path d="m10 6-4 4 4 4"/></svg>`,
@@ -219,27 +262,42 @@
     return map[key] || map.straight;
   }
 
-  function getPaceNoteSvg(pace) {
-    const isRight = pace.direction === 'right';
-    const flip = isRight ? '' : 'transform="scale(-1,1) translate(-44,0)"';
+  /**
+   * Initial-D arcade-style crisp directional curve arrow SVGs (strictly 4 tiers + LEFT/RIGHT):
+   *  - EASY    (20°–45°): gentle sweeping arrow
+   *  - MEDIUM  (45°–80°): curved bend arrow
+   *  - HARD    (80°–130°): sharp corner arrow
+   *  - HAIRPIN (>=130°): tight 180° U-turn arrow
+   */
+  function getInitialDCurveSvg(curve) {
+    const isRight = curve.direction === 'right';
+    const flip = isRight ? '' : 'transform="scale(-1,1) translate(-64,0)"';
     const common =
-      'width="32" height="32" viewBox="0 0 44 44" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"';
+      'width="52" height="52" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"';
 
-    if (pace.grade === 'R1') {
-      return `<svg ${common}><g ${flip}><path d="M13 38V16a9 9 0 0 1 18 0v14"/><path d="M24 23l7 7 7-7"/></g></svg>`;
+    if (curve.tier === 'HAIRPIN') {
+      return `<svg ${common}><g ${flip}><path d="M18 54V22a13 13 0 0 1 26 0v22"/><path d="M34 35l10 10 10-10"/></g></svg>`;
     }
-    if (pace.hasChicane) {
-      return `<svg ${common}><g ${flip}><path d="M12 38v-8c0-5 16-5 16-11V8"/><path d="M22 14l6-6 6 6"/></g></svg>`;
+    if (curve.tier === 'HARD') {
+      return `<svg ${common}><g ${flip}><path d="M18 54V26c0-5 4-9 9-9h23"/><path d="M40 8l10 9-10 9"/></g></svg>`;
     }
-    if (pace.grade === 'R2' || pace.grade === 'R3') {
-      return `<svg ${common}><g ${flip}><path d="M13 38V22c0-7 5-11 13-11h7"/><path d="M27 5l6 6-6 6"/></g></svg>`;
+    if (curve.tier === 'MEDIUM') {
+      return `<svg ${common}><g ${flip}><path d="M20 54V34c0-11 8-19 20-21l9-1"/><path d="M39 5l11 7-9 10"/></g></svg>`;
     }
-    return `<svg ${common}><g ${flip}><path d="M15 38V25c0-6 4-11 12-15"/><path d="M20 8l8 1-2 8"/></g></svg>`;
+    // EASY (20°-45°)
+    return `<svg ${common}><g ${flip}><path d="M24 54V36c0-8 4-15 14-23"/><path d="M27 12l12 0-1 12"/></g></svg>`;
   }
 
   // =========================================================================
-  // Toast Notifications
+  // Live Clock (Right Dock Item 1) & Toast Notifications
   // =========================================================================
+  function updateLiveClock() {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    dom.dockClock.textContent = `${hh}:${mm}`;
+  }
+
   function showToast(message, type = 'info', durationMs = 2600) {
     dom.hudToast.textContent = message;
     dom.hudToast.className = 'hud-toast visible';
@@ -374,14 +432,17 @@
       state.map.remove();
       state.map = null;
       state.mapReady = false;
+      state.car3d = null;
       state.lastCamApplied = null;
+      state.elevation.dimmedBridgeLayers.clear();
+      state.elevation.show3dObjectsApplied = true;
     }
     initMapbox();
     showToast('Mapbox トークンを設定しました');
   }
 
   // =========================================================================
-  // Mapbox GL JS v3 Standard Style Initialization & Route Layers
+  // Mapbox GL JS v3 Standard Style Initialization, Route Layers & 3D Car
   // =========================================================================
 
   /**
@@ -429,11 +490,13 @@
     state.currentZoom = modeCfg.baseZoom;
     state.currentPitch = modeCfg.pitch;
     state.lastCamApplied = null;
+    state.elevation.show3dObjectsApplied = true;
+    state.elevation.dimmedBridgeLayers.clear();
 
     map.on('error', (e) => {
       const status = e && e.error && e.error.status;
       if (!state.mapReady && (status === 401 || status === 403)) {
-        showToast('Mapboxアクセストークンが無効です。KEYボタンから再設定してください。', 'error', 5000);
+        showToast('Mapboxアクセストークンが無効です。メニューのAPI KEYから再設定してください。', 'error', 5000);
         openTokenModal(false);
       }
     });
@@ -443,20 +506,20 @@
       try {
         map.setConfigProperty('basemap', 'lightPreset', 'night');
         map.setConfigProperty('basemap', 'show3dObjects', true);
+        state.elevation.show3dObjectsApplied = true;
       } catch (_err) {}
       try {
-        // 対応エリアで高精細3D道路・車線標示・高架橋を有効化
         map.setConfigProperty('basemap', 'showHdRoads', true);
       } catch (_err) {}
 
-      // ソースとレイヤーは必ず style.load 完了後に追加
+      // ソース・ルートレイヤー・3D自車カスタムレイヤーを style.load 完了後に追加
       setupTerrainAndRouteSources(map);
       setupRouteLayers(map);
-      setupEgoVehicleMarker(map);
+      setupEgo3DCarLayer(map);
 
       state.mapReady = true;
 
-      // 初回パディング・カメラ・地形設定を適用
+      // 初回パディング・カメラ・地形・高架状態を適用
       const pad = getCockpitPadding();
       map.jumpTo({
         center: state.displayCoords,
@@ -477,9 +540,9 @@
       if (state.routeModel) {
         syncRouteSourcesToMap();
       }
+      evaluateElevationAndSeeThrough(performance.now(), true);
     });
 
-    // 手動ドラッグ・回転・傾き操作時は自動追従を一時停止
     const pauseFollowOnManualInput = (ev) => {
       if (ev && ev.originalEvent && state.followCamera) {
         setFollowCamera(false);
@@ -526,8 +589,13 @@
   }
 
   /**
-   * Standard Style `slot: 'middle'` + `line-emissive-strength: 1` で
-   * 視認性の高い純正ナビブルー（#2563eb / #3b82f6）ルートを描画
+   * 路面標示（白線・進行矢印）を隠さない半透明＆車線幅スリムルート描画：
+   *  - slot: 'middle'
+   *  - line-color: '#3b82f6'
+   *  - line-opacity: 0.55
+   *  - line-width: ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18]
+   *  - line-elevation-reference: 'ground' / line-z-offset（高架上では +8m に持ち上げ）
+   *  - line-occlusion-opacity + 高架下時のみ表示される X-Ray レイヤー
    */
   function setupRouteLayers(map) {
     if (!map.getLayer('route-traveled-line')) {
@@ -536,28 +604,18 @@
         type: 'line',
         slot: 'middle',
         source: 'route-traveled',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round',
+          'line-elevation-reference': 'ground',
+          'line-z-offset': 0,
+        },
         paint: {
           'line-color': '#3b82f6',
-          'line-opacity': 0.28,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 5, 19, 10, 21, 14],
+          'line-opacity': 0.2,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 3, 18, 8, 20, 14],
           'line-emissive-strength': 1,
-        },
-      });
-    }
-
-    if (!map.getLayer('route-casing')) {
-      map.addLayer({
-        id: 'route-casing',
-        type: 'line',
-        slot: 'middle',
-        source: 'route-remaining',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: {
-          'line-color': '#1d4ed8',
-          'line-opacity': 0.92,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 10, 17, 15, 19.5, 22, 21, 28],
-          'line-emissive-strength': 1,
+          'line-occlusion-opacity': 0.3,
         },
       });
     }
@@ -568,12 +626,18 @@
         type: 'line',
         slot: 'middle',
         source: 'route-remaining',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round',
+          'line-elevation-reference': 'ground',
+          'line-z-offset': 0,
+        },
         paint: {
           'line-color': '#3b82f6',
-          'line-opacity': 0.98,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 6, 17, 10, 19.5, 15, 21, 20],
+          'line-opacity': 0.55,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18],
           'line-emissive-strength': 1,
+          'line-occlusion-opacity': 0.45,
         },
       });
     }
@@ -584,12 +648,41 @@
         type: 'line',
         slot: 'middle',
         source: 'route-jct-segment',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round',
+          'line-elevation-reference': 'ground',
+          'line-z-offset': 0,
+        },
         paint: {
           'line-color': '#60a5fa',
-          'line-opacity': 0.96,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 16, 10, 19.5, 17, 21, 22],
+          'line-opacity': 0.45,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18],
           'line-emissive-strength': 1,
+          'line-occlusion-opacity': 0.5,
+        },
+      });
+    }
+
+    // 高架下走行時のみ有効化する X-Ray オクルージョン透過ルートレイヤー
+    if (!map.getLayer('route-xray-underpass')) {
+      map.addLayer({
+        id: 'route-xray-underpass',
+        type: 'line',
+        slot: 'top',
+        source: 'route-remaining',
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round',
+          visibility: 'none',
+        },
+        paint: {
+          'line-color': '#60a5fa',
+          'line-opacity': 0.42,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18],
+          'line-dasharray': [2, 1.5],
+          'line-emissive-strength': 1,
+          'line-occlusion-opacity': 0.65,
         },
       });
     }
@@ -601,10 +694,10 @@
         slot: 'middle',
         source: 'route-jct-beacon',
         paint: {
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 16, 10, 20, 18],
-          'circle-color': 'rgba(59, 130, 246, 0.25)',
-          'circle-stroke-width': 2.5,
-          'circle-stroke-color': '#ffffff',
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 16, 9, 20, 15],
+          'circle-color': 'rgba(59, 130, 246, 0.22)',
+          'circle-stroke-width': 2,
+          'circle-stroke-color': 'rgba(255, 255, 255, 0.85)',
           'circle-pitch-alignment': 'map',
           'circle-emissive-strength': 1,
         },
@@ -612,29 +705,30 @@
     }
   }
 
-  function setupEgoVehicleMarker(map) {
-    if (state.egoMarker) {
-      state.egoMarker.remove();
+  /**
+   * 2Dマーカーを廃止し、Three.js Custom 3D Layer による立体的な3D車両モデルを配置
+   */
+  function setupEgo3DCarLayer(map) {
+    if (!window.Car3DLayer || !window.THREE) {
+      return;
+    }
+    if (map.getLayer('ego-car-3d-layer')) {
+      try {
+        map.removeLayer('ego-car-3d-layer');
+      } catch (_err) {}
     }
 
-    const el = document.createElement('div');
-    el.className = 'ego-vehicle-marker';
-    el.innerHTML = `
-      <svg viewBox="0 0 64 64" aria-hidden="true">
-        <circle cx="32" cy="34" r="22" fill="rgba(18, 18, 22, 0.78)" stroke="rgba(255, 255, 255, 0.88)" stroke-width="2.5"/>
-        <path class="ego-fill" d="M32 15 L45 45 L32 39 L19 45 Z"/>
-      </svg>
-    `;
+    state.car3d = window.Car3DLayer.createCar3DLayer({
+      id: 'ego-car-3d-layer',
+      initialCoords: state.displayCoords,
+      initialHeading: state.displayHeading,
+    });
 
-    state.egoMarkerEl = el;
-    state.egoMarker = new mapboxgl.Marker({
-      element: el,
-      pitchAlignment: 'map',
-      rotationAlignment: 'map',
-    })
-      .setLngLat(state.vehicle.coords)
-      .setRotation(state.vehicle.heading)
-      .addTo(map);
+    try {
+      map.addLayer(state.car3d.layer);
+    } catch (_err) {
+      state.car3d = null;
+    }
   }
 
   function updateDestinationMarker(coords) {
@@ -655,6 +749,254 @@
   }
 
   // =========================================================================
+  // Overpass ("上") vs Underpass ("下") Detection & Overhead See-Through
+  // =========================================================================
+  function queryRenderedRoadFeaturesNearEgo(map) {
+    if (!map || !state.mapReady) return [];
+    try {
+      const pt = map.project(state.displayCoords);
+      if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return [];
+      const padPx = 24;
+      const bbox = [
+        [pt.x - padPx, pt.y - padPx],
+        [pt.x + padPx, pt.y + padPx],
+      ];
+      return map.queryRenderedFeatures(bbox) || [];
+    } catch (_err) {
+      return [];
+    }
+  }
+
+  function setStyleBridgeLayersOpacity(map, dimmed) {
+    if (!map || !state.mapReady) return;
+    const store = state.elevation.dimmedBridgeLayers;
+    const ownIds = new Set([
+      'route-traveled-line',
+      'route-core-ribbon',
+      'jct-segment-core',
+      'route-xray-underpass',
+      'jct-focus-ring',
+      'ego-car-3d-layer',
+    ]);
+
+    if (!dimmed) {
+      store.forEach((savedProps, layerId) => {
+        if (!map.getLayer(layerId)) return;
+        savedProps.forEach((origVal, propName) => {
+          try {
+            map.setPaintProperty(layerId, propName, origVal);
+          } catch (_e) {}
+        });
+      });
+      store.clear();
+      return;
+    }
+
+    let styleLayers = [];
+    try {
+      const styleObj = map.getStyle();
+      styleLayers = (styleObj && Array.isArray(styleObj.layers) && styleObj.layers) || [];
+    } catch (_e) {
+      return;
+    }
+
+    styleLayers.forEach((layer) => {
+      if (!layer || !layer.id || ownIds.has(layer.id)) return;
+      const filterStr = layer.filter ? JSON.stringify(layer.filter) : '';
+      const isBridgeLayer = /(bridge|elevated|viaduct|overpass)/i.test(`${layer.id} ${filterStr}`);
+      if (!isBridgeLayer) return;
+
+      const propsToDim = [];
+      if (layer.type === 'fill') propsToDim.push('fill-opacity');
+      else if (layer.type === 'line') propsToDim.push('line-opacity');
+      else if (layer.type === 'symbol') propsToDim.push('icon-opacity', 'text-opacity');
+      else if (layer.type === 'fill-extrusion') propsToDim.push('fill-extrusion-opacity');
+
+      if (propsToDim.length === 0) return;
+
+      if (!store.has(layer.id)) {
+        const saved = new Map();
+        propsToDim.forEach((propName) => {
+          try {
+            saved.set(propName, map.getPaintProperty(layer.id, propName));
+          } catch (_e) {
+            saved.set(propName, undefined);
+          }
+        });
+        store.set(layer.id, saved);
+      }
+
+      propsToDim.forEach((propName) => {
+        try {
+          map.setPaintProperty(layer.id, propName, UNDERPASS_OPACITY);
+        } catch (_e) {}
+      });
+    });
+  }
+
+  function applyElevationVisuals(elevState) {
+    const map = state.map;
+    const isElevated = elevState === 'elevated';
+    const isUnderpass = elevState === 'underpass';
+
+    state.elevation.targetZOffsetM = isElevated ? ELEVATED_Z_OFFSET_M : 0;
+
+    if (!map || !state.mapReady) {
+      updateElevationBadgeUi();
+      return;
+    }
+
+    // 1. Update route line-z-offset (+8m on elevated highways, 0m on surface/underpass)
+    const routeLayerIds = ['route-core-ribbon', 'route-traveled-line', 'jct-segment-core'];
+    routeLayerIds.forEach((id) => {
+      if (!map.getLayer(id)) return;
+      try {
+        map.setLayoutProperty(id, 'line-z-offset', state.elevation.targetZOffsetM);
+      } catch (_e) {}
+    });
+
+    // 2. Scan and dim classic/custom bridge layers (0.22 opacity) when underpass, or restore
+    setStyleBridgeLayersOpacity(map, isUnderpass);
+
+    // 3. Mapbox Standard Style basemap: temporarily flatten overhead 3D structures in underpass mode
+    const desiredShow3d = !isUnderpass;
+    if (state.elevation.show3dObjectsApplied !== desiredShow3d) {
+      try {
+        map.setConfigProperty('basemap', 'show3dObjects', desiredShow3d);
+        state.elevation.show3dObjectsApplied = desiredShow3d;
+      } catch (_e) {}
+    }
+
+    // 4. Toggle X-Ray occlusion route overlay for underpass see-through clarity
+    if (map.getLayer('route-xray-underpass')) {
+      try {
+        map.setLayoutProperty('route-xray-underpass', 'visibility', isUnderpass ? 'visible' : 'none');
+      } catch (_e) {}
+    }
+
+    updateElevationBadgeUi();
+  }
+
+  function evaluateElevationAndSeeThrough(nowTs, forceImmediate = false) {
+    if (!forceImmediate && nowTs - state.elevation.lastCheckTs < 350) {
+      return;
+    }
+    state.elevation.lastCheckTs = nowTs;
+
+    const activeStep = state.routeModel
+      ? Geo.getActiveRouteStep(state.routeModel, state.vehicle.routeDistKm)
+      : null;
+
+    const renderedFeatures =
+      state.sim.forceUnderpassSeeThrough || !state.mapReady
+        ? []
+        : queryRenderedRoadFeaturesNearEgo(state.map);
+
+    const res = Geo.classifyElevationState({
+      modeId: state.mode,
+      activeStep,
+      renderedFeatures,
+      forceUnderpass: state.sim.forceUnderpassSeeThrough,
+    });
+
+    const changed = res.state !== state.elevation.state;
+    state.elevation.hasBridgeOverhead = res.hasBridgeOverhead;
+    state.elevation.isHighwayRoute = res.isHighwayRoute;
+
+    if (changed || forceImmediate) {
+      state.elevation.state = res.state;
+      applyElevationVisuals(res.state);
+    }
+  }
+
+  function updateElevationBadgeUi() {
+    const elev = state.elevation.state;
+    dom.elevationStatusPill.classList.remove('hidden', 'elev-up', 'elev-under');
+    if (elev === 'elevated') {
+      dom.elevationStatusPill.classList.add('elev-up');
+      dom.elevationStatusPill.textContent = '高架上 +8m';
+    } else if (elev === 'underpass') {
+      dom.elevationStatusPill.classList.add('elev-under');
+      dom.elevationStatusPill.textContent = '高架下 透過';
+    } else {
+      dom.elevationStatusPill.classList.add('hidden');
+    }
+  }
+
+  function setForceUnderpassSeeThrough(enabled) {
+    state.sim.forceUnderpassSeeThrough = Boolean(enabled);
+    dom.toggleUnderpassSeeThrough.checked = state.sim.forceUnderpassSeeThrough;
+    evaluateElevationAndSeeThrough(performance.now(), true);
+    showToast(
+      state.sim.forceUnderpassSeeThrough
+        ? '高架下シースルー透過 ON（頭上高架半透明＋X-Ray有効）'
+        : '高架下シースルー透過 OFF（自動判定へ復帰）',
+      state.sim.forceUnderpassSeeThrough ? 'warn' : 'info',
+      2600
+    );
+  }
+
+  // =========================================================================
+  // Mountain Mode Initial-D Curve HUD (500ms Throttle + 2.5s Lock)
+  // =========================================================================
+  function resetMountainCurveDisplay() {
+    state.mountainCurve.lastEvalTs = 0;
+    state.mountainCurve.lockedUntilTs = 0;
+    state.mountainCurve.displayed = null;
+    dom.initialdCurveCard.className = 'initiald-curve-card hidden';
+  }
+
+  function renderInitialDCurveCard(curve) {
+    if (!curve) {
+      dom.initialdCurveCard.className = 'initiald-curve-card hidden';
+      return;
+    }
+    dom.initialdCurveCard.className = `initiald-curve-card tier-${curve.tier}`;
+    dom.initialdArrowBox.innerHTML = getInitialDCurveSvg(curve);
+    dom.initialdDirLabel.textContent = curve.dirEn;
+    dom.initialdRankLabel.textContent = curve.tier;
+  }
+
+  function evaluateMountainCurveThrottled(nowTs, forceEval = false) {
+    if (state.mode !== 'mountain' || !state.routeModel) {
+      if (state.mountainCurve.displayed !== null) {
+        resetMountainCurveDisplay();
+      } else {
+        dom.initialdCurveCard.classList.add('hidden');
+      }
+      return;
+    }
+
+    const mc = state.mountainCurve;
+
+    // 1. Throttle evaluation to every 500ms (0.5 sec)
+    if (!forceEval && nowTs - mc.lastEvalTs < mc.evalIntervalMs) {
+      return;
+    }
+    mc.lastEvalTs = nowTs;
+
+    // 2. Display lock: hold displayed curve icon for at least 2.5 seconds (2500ms)
+    if (!forceEval && mc.displayed && nowTs < mc.lockedUntilTs) {
+      return;
+    }
+
+    const curve = Geo.analyzeMountainPaceNote(state.routeModel, state.vehicle.routeDistKm, {
+      lookaheadMinMeters: CFG.modes.mountain.lookaheadMinMeters,
+      lookaheadMaxMeters: CFG.modes.mountain.lookaheadMaxMeters,
+    });
+
+    if (curve) {
+      mc.displayed = curve;
+      mc.lockedUntilTs = nowTs + mc.lockDurationMs;
+      renderInitialDCurveCard(curve);
+    } else {
+      mc.displayed = null;
+      mc.lockedUntilTs = 0;
+      renderInitialDCurveCard(null);
+    }
+  }
+
+  // =========================================================================
   // 3-Mode Switching, Terrain & Per-Frame Proximity Auto-3D Zoom Camera
   // =========================================================================
   function applyTerrainForMode(modeId) {
@@ -671,6 +1013,19 @@
     } catch (_err) {}
   }
 
+  function updateModeButtonsUi(modeId) {
+    const modeCfg = CFG.modes[modeId];
+    dom.modeCycleIcon.innerHTML = getModeIconSvg(modeId);
+    dom.modeCycleLabel.textContent = getModeDockShortLabel(modeId);
+    dom.modeStatusPill.textContent = modeCfg.label;
+  }
+
+  function cycleDrivingMode() {
+    const idx = MODE_ORDER.indexOf(state.mode);
+    const nextMode = MODE_ORDER[(idx + 1) % MODE_ORDER.length];
+    setDrivingMode(nextMode, true);
+  }
+
   function setDrivingMode(modeId, animateCamera = true) {
     if (!CFG.modes[modeId]) return;
     state.mode = modeId;
@@ -681,10 +1036,7 @@
       updateJctBeaconOnMap(null);
     }
 
-    dom.modeButtons.forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.mode === modeId);
-    });
-
+    updateModeButtonsUi(modeId);
     applyTerrainForMode(modeId);
 
     const targetZoom = Geo.computeSpeedAdaptiveZoom(
@@ -702,7 +1054,10 @@
       state.lastCamApplied = null;
     }
 
+    evaluateElevationAndSeeThrough(performance.now(), true);
     evaluateCloseZoomEveryFrame(false);
+    resetMountainCurveDisplay();
+    evaluateMountainCurveThrottled(performance.now(), true);
     updateNavigationAnalytics();
     showToast(`${CFG.modes[modeId].label}モードに切替ました`, 'info', 1800);
   }
@@ -774,7 +1129,7 @@
 
   /**
    * 毎フレーム turf.distance で routes[0].legs[0].steps の各 maneuver.location との距離を計算し、
-   * 閾値（市街地 150m / 高速 800m）以下で確実に至近距離 3D カメラ（easeTo）を発火させる。
+   * 閾値（市街地 150m / 高速 800m）以下で至近距離 3D カメラ（easeTo）を発火させる。
    */
   function evaluateCloseZoomEveryFrame(notify = true) {
     const modeCfg = CFG.modes[state.mode];
@@ -942,7 +1297,7 @@
     const [lng, lat] = state.vehicle.coords;
     let items = [];
 
-    // Primary: Mapbox Geocoding API v5 (日本語の施設名・駅・IC・住所を幅広く検索可能)
+    // Primary: Mapbox Geocoding API v5
     try {
       const v5Url =
         `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json` +
@@ -986,7 +1341,7 @@
     const valid = items.filter((it) => Array.isArray(it.coords) && it.coords.length >= 2);
     if (valid.length === 0) {
       dom.searchResultsList.innerHTML =
-        '<div class="map-hint-note">候補が見つかりませんでした。別のキーワードまたはマップ上のクリック／タップでお試しください。</div>';
+        '<div class="map-hint-note">候補が見つかりませんでした。別キーワードまたはマップタップでお試しください。</div>';
       return;
     }
 
@@ -1099,7 +1454,6 @@
       await openPinConfirmation([e.lngLat.lng, e.lngLat.lat]);
     });
 
-    // マップ上のクリック / タップでいつでも目的地ピン設定が可能
     map.on('click', async (e) => {
       if (longPressed) {
         longPressed = false;
@@ -1185,19 +1539,20 @@
       state.displayHeading = state.vehicle.heading;
       state.autoCloseZoomActive = false;
       state.isCloseZoomActive = state.sim.forceCloseZoom;
-      state.activePaceNote = null;
-      state.lastPaceHeadline = '';
       state.lastCamApplied = null;
+      resetMountainCurveDisplay();
 
       updateDestinationMarker(destCoords);
       syncRouteSourcesToMap();
       setPinMode(false);
       clearPendingPin();
-      setSearchDrawerOpen(false);
+      setMenuDrawerOpen(false);
       dom.btnClearRoute.classList.remove('hidden');
 
       updateNavigationAnalytics();
+      evaluateElevationAndSeeThrough(performance.now(), true);
       evaluateCloseZoomEveryFrame(false);
+      evaluateMountainCurveThrottled(performance.now(), true);
       setFollowCamera(true);
 
       showToast(
@@ -1214,13 +1569,13 @@
     state.routeModel = null;
     state.destination = null;
     state.navProgress = null;
-    state.activePaceNote = null;
     state.vehicle.routeDistKm = 0;
     state.vehicle.isSnappedToRoute = false;
     state.autoCloseZoomActive = false;
     state.isCloseZoomActive = state.sim.forceCloseZoom;
     state.closeZoomStep = null;
     state.lastManeuverDirectDistM = Infinity;
+    resetMountainCurveDisplay();
 
     if (state.sim.demoMode) {
       state.sim.demoMode = false;
@@ -1231,11 +1586,12 @@
     updateDestinationMarker(null);
     updateJctBeaconOnMap(null);
     syncRouteSourcesToMap();
+    evaluateElevationAndSeeThrough(performance.now(), true);
     setFollowCamera(true);
     refreshGuidanceUi();
     dom.btnClearRoute.classList.add('hidden');
-    dom.destTriggerTitle.textContent = '目的地を検索 / タップ設定';
-    dom.destTriggerMeta.textContent = 'ルート未設定 · クリック/長押し対応';
+    dom.routeDestName.textContent = 'ルート未設定';
+    dom.routeEtaVal.textContent = '--';
     showToast('ルート案内を終了しました');
   }
 
@@ -1276,6 +1632,7 @@
       state.vehicle.speedMps = preset.defaultSpeedKmh / 3.6;
       state.gps.lastValidSpeedMps = state.vehicle.speedMps;
       setFollowCamera(true);
+      updateGpsStatusUi();
       showToast(`${preset.badge}デモ走行を開始 (${preset.defaultSpeedKmh} km/h)`);
     }
   }
@@ -1385,8 +1742,8 @@
 
     state.gps.lastValidHeading = state.vehicle.heading;
 
-    if (finalSpeedMps * 3.6 >= 10 && state.searchOpen) {
-      setSearchDrawerOpen(false);
+    if (finalSpeedMps * 3.6 >= 10 && state.menuOpen) {
+      setMenuDrawerOpen(false);
     }
 
     updateNavigationAnalytics();
@@ -1418,7 +1775,6 @@
     state.sim.lockedTunnelSpeedMps = activeSpeedMps;
     state.vehicle.speedMps = activeSpeedMps;
 
-    if (state.egoMarkerEl) state.egoMarkerEl.classList.add('is-dr');
     updateGpsStatusUi();
     showToast(`自律航法（Dead Reckoning）へ切替：${reason}`, 'warn', 3000);
   }
@@ -1428,7 +1784,6 @@
     state.gps.isDeadReckoning = false;
     state.gps.drMode = 'OFF';
     state.sim.lockedTunnelSpeedMps = null;
-    if (state.egoMarkerEl) state.egoMarkerEl.classList.remove('is-dr');
     updateGpsStatusUi();
   }
 
@@ -1450,7 +1805,7 @@
   }, 250);
 
   // =========================================================================
-  // Core 60fps Kinematic, Per-Frame Proximity Zoom & Camera Loop
+  // Core 60fps Kinematic, 3D Car Pose, Elevation & Camera Loop
   // =========================================================================
   function tickAnimationLoop(ts) {
     if (!state.lastFrameTs) state.lastFrameTs = ts;
@@ -1519,6 +1874,7 @@
         dom.toggleDemoMode.checked = false;
         dom.demoActiveChip.classList.add('hidden');
         state.vehicle.speedMps = 0;
+        updateGpsStatusUi();
         showToast('目的地に到着しました（デモ走行完了）', 'info', 3500);
       }
 
@@ -1529,28 +1885,46 @@
       }
     }
 
-    // 2. Per-frame turf.distance proximity check against routes[0].legs[0].steps
+    // 2. Per-frame turf.distance proximity check & throttled Mountain Curve / Elevation checks
     if (state.routeModel) {
       evaluateCloseZoomEveryFrame(true);
     }
+    evaluateElevationAndSeeThrough(ts, false);
+    evaluateMountainCurveThrottled(ts, false);
 
-    // 3. Smooth display interpolation & dirty-checked 3D Mapbox Camera update
+    // 3. Smooth display interpolation & 3D Car Pose + dirty-checked Camera update
     const smoothFactor = Math.min(1, dtSec * 10);
     state.displayCoords[0] += (state.vehicle.coords[0] - state.displayCoords[0]) * smoothFactor;
     state.displayCoords[1] += (state.vehicle.coords[1] - state.displayCoords[1]) * smoothFactor;
     state.displayHeading = Geo.lerpBearing(state.displayHeading, state.vehicle.heading, smoothFactor);
 
     if (state.map && state.mapReady) {
-      if (state.egoMarker) {
-        state.egoMarker.setLngLat(state.displayCoords);
-        state.egoMarker.setRotation(state.displayHeading);
+      let terrainElevExaggerated = 0;
+      if (state.mode === 'mountain' && typeof state.map.queryTerrainElevation === 'function') {
+        const rawElev = state.map.queryTerrainElevation(state.displayCoords, { exaggerated: false });
+        if (Number.isFinite(rawElev)) {
+          state.vehicle.altitudeM = Math.round(rawElev);
+        }
+        const visElev = state.map.queryTerrainElevation(state.displayCoords, { exaggerated: true });
+        if (Number.isFinite(visElev)) {
+          terrainElevExaggerated = visElev;
+        }
       }
 
-      if (state.mode === 'mountain' && typeof state.map.queryTerrainElevation === 'function') {
-        const elev = state.map.queryTerrainElevation(state.displayCoords, { exaggerated: false });
-        if (Number.isFinite(elev)) {
-          state.vehicle.altitudeM = Math.round(elev);
-        }
+      const targetCarAltM = terrainElevExaggerated + state.elevation.targetZOffsetM;
+      const altLerp = Math.min(1, dtSec * 6.5);
+      state.elevation.currentCarAltitudeM +=
+        (targetCarAltM - state.elevation.currentCarAltitudeM) * altLerp;
+
+      if (state.car3d) {
+        state.car3d.updatePose({
+          lng: state.displayCoords[0],
+          lat: state.displayCoords[1],
+          heading: state.displayHeading,
+          altitudeM: state.elevation.currentCarAltitudeM,
+          isDeadReckoning: state.gps.isDeadReckoning,
+          underpassSeeThrough: state.elevation.state === 'underpass',
+        });
       }
 
       if (state.followCamera && !state.isEasingCamera) {
@@ -1567,7 +1941,6 @@
         state.currentPitch += (desiredPitch - state.currentPitch) * zoomLerp;
 
         const pad = getCockpitPadding();
-        // Only invoke jumpTo when pose actually changed (prevents stationary GPU/input interference)
         if (
           cameraHasChanged(
             state.displayCoords,
@@ -1595,46 +1968,28 @@
       }
     }
 
-    // 4. Instrument cluster & debug readouts
+    // 4. Instrument cluster & menu telemetry readouts
     renderSpeedometerAndTelemetry();
-    if (state.gps.isDeadReckoning) {
-      updateGpsStatusUi();
-    }
 
     requestAnimationFrame(tickAnimationLoop);
   }
 
   // =========================================================================
-  // Navigation Analytics (Steps / Highway Branch / Mountain Pace Notes)
+  // Navigation Analytics (Steps / Highway Branch / Route Progress)
   // =========================================================================
   function updateNavigationAnalytics() {
     if (!state.routeModel) {
       state.navProgress = null;
-      state.activePaceNote = null;
       refreshGuidanceUi();
       return;
     }
 
     state.navProgress = Geo.getNavigationProgress(state.routeModel, state.vehicle.routeDistKm);
-
-    if (state.mode === 'mountain') {
-      state.activePaceNote = Geo.analyzeMountainPaceNote(
-        state.routeModel,
-        state.vehicle.routeDistKm,
-        {
-          lookaheadMinMeters: CFG.modes.mountain.lookaheadMinMeters,
-          lookaheadMaxMeters: CFG.modes.mountain.lookaheadMaxMeters,
-        }
-      );
-    } else {
-      state.activePaceNote = null;
-    }
-
     refreshGuidanceUi();
   }
 
   // =========================================================================
-  // HUD Rendering Updates
+  // HUD Rendering Updates (Left Edge Tesla Panel + Menu Telemetry)
   // =========================================================================
   function renderSpeedometerAndTelemetry() {
     const speedKmh = Math.max(0, Math.round(state.vehicle.speedMps * 3.6));
@@ -1648,18 +2003,27 @@
       .padStart(3, '0');
     dom.headingVal.textContent = `${hdg}° ${Geo.bearingToCompass(state.displayHeading)}`;
 
-    const modeCode = CFG.modes[state.mode].code;
-    const altStr = state.vehicle.altitudeM !== null ? `${state.vehicle.altitudeM}m` : '--m';
-    dom.altModeVal.textContent = `${modeCode} · ${altStr}`;
-
     if (state.destination && state.navProgress) {
-      dom.destTriggerTitle.textContent = state.destination.name;
-      dom.destTriggerMeta.textContent = `残り ${Geo.formatDistanceJa(state.navProgress.remainingMeters)} · 約${Geo.formatDurationJa(state.navProgress.remainingSeconds)}`;
+      dom.routeDestName.textContent = state.destination.name;
+      dom.routeEtaVal.textContent = `${Geo.formatDistanceJa(state.navProgress.remainingMeters)} · ${Geo.formatDurationJa(state.navProgress.remainingSeconds)}`;
+    } else {
+      dom.routeDestName.textContent = 'ルート未設定';
+      dom.routeEtaVal.textContent = '--';
     }
 
-    if (state.debugOpen) {
-      dom.dbgZoom.textContent = state.map ? state.map.getZoom().toFixed(2) : state.currentZoom.toFixed(2);
-      dom.dbgPitch.textContent = state.map ? `${Math.round(state.map.getPitch())}°` : `${Math.round(state.currentPitch)}°`;
+    if (state.menuOpen) {
+      dom.dbgZoom.textContent = state.map
+        ? state.map.getZoom().toFixed(2)
+        : state.currentZoom.toFixed(2);
+      dom.dbgPitch.textContent = state.map
+        ? `${Math.round(state.map.getPitch())}°`
+        : `${Math.round(state.currentPitch)}°`;
+      dom.dbgElev.textContent =
+        state.elevation.state === 'elevated'
+          ? '高架上 (+8m)'
+          : state.elevation.state === 'underpass'
+          ? '高架下 (透過)'
+          : '一般道 (0m)';
       dom.dbgAutoZoom.textContent = state.sim.forceCloseZoom
         ? 'FORCED'
         : state.autoCloseZoomActive
@@ -1669,90 +2033,46 @@
       dom.dbgBranch.textContent = Number.isFinite(state.lastManeuverDirectDistM)
         ? Geo.formatDistanceJa(state.lastManeuverDirectDistM)
         : '--';
-      dom.dbgCurve.textContent = state.activePaceNote
-        ? state.activePaceNote.callout
-        : 'CLEAR';
     }
   }
 
   function updateGpsStatusUi() {
-    dom.gpsCard.classList.remove('status-online', 'status-dr', 'status-acquiring');
+    dom.gpsStatusPill.classList.remove('gps-online', 'gps-dr', 'gps-standby');
 
     if (state.gps.isDeadReckoning) {
-      dom.gpsCard.classList.add('status-dr');
-      const sec = Math.max(0, Math.round((Date.now() - state.gps.drStartedAt) / 1000));
-      const distStr = Geo.formatDistanceJa(state.gps.drAccumulatedMeters);
-      const snapTag = state.gps.drMode === 'ROUTE_SNAP' ? 'ルートスナップ' : '直進ベクトル';
-      dom.gpsPrimary.textContent = 'DEAD RECKONING（自律航法中）';
-      dom.gpsSecondary.textContent = `${snapTag} · ${distStr} (${sec}s)`;
+      dom.gpsStatusPill.classList.add('gps-dr');
+      dom.gpsPrimaryLabel.textContent = '自律航法';
       return;
     }
 
     if (state.sim.demoMode) {
-      dom.gpsCard.classList.add('status-online');
-      dom.gpsPrimary.textContent = 'GPS ONLINE (SIM)';
-      dom.gpsSecondary.textContent = `仮想走行 · ${state.sim.demoSpeedKmh} km/h`;
+      dom.gpsStatusPill.classList.add('gps-online');
+      dom.gpsPrimaryLabel.textContent = 'SIM走行';
       return;
     }
 
     if (state.gps.hasFix) {
-      dom.gpsCard.classList.add('status-online');
-      const acc = state.vehicle.accuracyM !== null ? `±${state.vehicle.accuracyM}m` : '高精度';
-      const snap = state.vehicle.isSnappedToRoute ? ' · ルート一致' : '';
-      dom.gpsPrimary.textContent = 'GPS ONLINE';
-      dom.gpsSecondary.textContent = `精度 ${acc}${snap}`;
+      dom.gpsStatusPill.classList.add('gps-online');
+      dom.gpsPrimaryLabel.textContent = 'GPS';
       return;
     }
 
-    dom.gpsCard.classList.add('status-acquiring');
-    dom.gpsPrimary.textContent = 'GPS STANDBY';
-    dom.gpsSecondary.textContent = '位置情報待機 / SIMでテスト可';
+    dom.gpsStatusPill.classList.add('gps-standby');
+    dom.gpsPrimaryLabel.textContent = 'GPS待機';
   }
 
   function refreshGuidanceUi() {
     const mode = state.mode;
     const nav = state.navProgress;
 
-    dom.guidanceBanner.classList.add('hidden');
-    dom.paceNoteBanner.classList.add('hidden');
-    dom.mountainClearPill.classList.add('hidden');
-
-    // --- Mountain Mode HUD ---
-    if (mode === 'mountain') {
-      if (state.activePaceNote) {
-        const p = state.activePaceNote;
-        dom.paceNoteBanner.className = `hud-panel pace-note-banner grade-${p.grade}`;
-        if (p.headline !== state.lastPaceHeadline) {
-          dom.paceNoteBanner.classList.add('pace-pop');
-          state.lastPaceHeadline = p.headline;
-        }
-        dom.paceIconBox.innerHTML = getPaceNoteSvg(p);
-        dom.paceGradePill.textContent = p.callout;
-        dom.paceKicker.textContent = p.hasChicane
-          ? '前方曲率ペースノート · 連続S字'
-          : '前方100–250m 曲率解析';
-        dom.paceHeadline.textContent = p.headline;
-        dom.paceSubline.textContent = p.subline;
-      } else {
-        state.lastPaceHeadline = '';
-        dom.mountainClearPill.classList.remove('hidden');
-        dom.mountainStatusText.textContent = state.routeModel
-          ? '前方250m 緩やか（急カーブなし）'
-          : 'ルート設定で実ルート曲率ペースノート稼働';
-      }
-      return;
-    }
-
-    // --- City & Highway Mode HUD ---
     if (!nav) {
-      dom.guidanceBanner.className = 'hud-panel guidance-banner';
       dom.maneuverIconBox.innerHTML = getManeuverSvg('straight');
-      dom.guidanceDistance.textContent = mode === 'highway' ? '高速' : '案内待機';
-      dom.guidanceTag.textContent = mode === 'highway' ? 'IC / JCT 監視' : 'Standard 3D';
-      dom.jctZoomBadge.classList.toggle('hidden', !state.sim.forceCloseZoom);
-      if (state.sim.forceCloseZoom) dom.jctZoomBadge.textContent = '強制3Dズーム';
-      dom.guidanceInstruction.textContent = '目的地を設定してルート案内を開始';
-      dom.guidanceSub.textContent = '左下の検索、またはマップをクリック／タップして目的地指定';
+      dom.guidanceDistance.textContent = mode === 'highway' ? '高速巡航' : mode === 'mountain' ? '山岳走行' : '案内待機';
+      dom.guidanceTag.textContent =
+        mode === 'highway' ? 'IC / JCT 監視' : mode === 'mountain' ? '3D地形・カーブ解析' : 'Standard 3D';
+      dom.zoomActivePill.classList.toggle('hidden', !state.sim.forceCloseZoom);
+      if (state.sim.forceCloseZoom) dom.zoomActivePill.textContent = '強制ZOOM';
+      dom.guidanceInstruction.textContent = '右メニューまたはマップタップで目的地設定';
       return;
     }
 
@@ -1762,52 +2082,43 @@
         ? state.lastManeuverDirectDistM
         : nav.distToBranchMeters;
 
-      dom.guidanceBanner.className = 'hud-panel guidance-banner';
       dom.maneuverIconBox.innerHTML = getManeuverSvg(branch.maneuverKey);
       dom.guidanceDistance.textContent = Geo.formatDistanceJa(distMeters);
       dom.guidanceTag.textContent = nav.isFallbackBranch ? '次の分岐' : branch.branchTag;
-      dom.jctZoomBadge.classList.toggle('hidden', !state.isCloseZoomActive);
-      dom.jctZoomBadge.textContent = state.sim.forceCloseZoom ? '強制3Dズーム' : 'JCT 3Dズーム';
+      dom.zoomActivePill.classList.toggle('hidden', !state.isCloseZoomActive);
+      dom.zoomActivePill.textContent = state.sim.forceCloseZoom ? '強制ZOOM' : 'JCT 3D';
       dom.guidanceInstruction.textContent = branch.title || branch.instruction;
-      dom.guidanceSub.textContent = state.isCloseZoomActive
-        ? `800m以内接近 · 立体交差3D近接表示中（${branch.instruction}）`
-        : branch.instruction;
-    } else {
-      const step = state.closeZoomStep || nav.nextStep;
-      const distMeters = Number.isFinite(state.lastManeuverDirectDistM)
+      return;
+    }
+
+    // City & Mountain Mode left-panel turn guidance
+    const step = state.closeZoomStep || nav.nextStep;
+    const distMeters =
+      mode === 'city' && Number.isFinite(state.lastManeuverDirectDistM)
         ? state.lastManeuverDirectDistM
         : nav.distToStepMeters;
 
-      dom.guidanceBanner.className = 'hud-panel guidance-banner';
-      dom.maneuverIconBox.innerHTML = getManeuverSvg(step.maneuverKey);
-      dom.guidanceDistance.textContent = Geo.formatDistanceJa(distMeters);
-      dom.guidanceTag.textContent = step.maneuver.type === 'arrive' ? '到着' : '次の交差点';
-      dom.jctZoomBadge.classList.toggle('hidden', !state.isCloseZoomActive);
-      dom.jctZoomBadge.textContent = state.sim.forceCloseZoom ? '強制3Dズーム' : '交差点ズーム';
-      dom.guidanceInstruction.textContent = step.instruction || step.title;
-      dom.guidanceSub.textContent = state.isCloseZoomActive
-        ? '150m以内接近 · 車線・交差点至近距離ビュー'
-        : nav.followingStep
-        ? `その先：${nav.followingStep.title}（${Geo.formatDistanceJa(step.distance)}）`
-        : `目的地まで残り ${Geo.formatDistanceJa(nav.remainingMeters)}`;
-    }
+    dom.maneuverIconBox.innerHTML = getManeuverSvg(step.maneuverKey);
+    dom.guidanceDistance.textContent = Geo.formatDistanceJa(distMeters);
+    dom.guidanceTag.textContent =
+      step.maneuver.type === 'arrive'
+        ? '目的地'
+        : mode === 'mountain'
+        ? '次の案内'
+        : '次の交差点';
+    dom.zoomActivePill.classList.toggle('hidden', !state.isCloseZoomActive);
+    dom.zoomActivePill.textContent = state.sim.forceCloseZoom ? '強制ZOOM' : '交差点3D';
+    dom.guidanceInstruction.textContent = step.instruction || step.title;
   }
 
   // =========================================================================
-  // UI Drawers, Presets & Event Bindings
+  // Menu Drawer, Presets & Event Bindings
   // =========================================================================
-  function setSearchDrawerOpen(open) {
-    state.searchOpen = open;
-    dom.searchDrawer.classList.toggle('collapsed', !open);
-    dom.btnDestToggle.setAttribute('aria-expanded', String(open));
-    if (open) setDebugDrawerOpen(false);
-  }
-
-  function setDebugDrawerOpen(open) {
-    state.debugOpen = open;
-    dom.debugDrawer.classList.toggle('collapsed', !open);
-    dom.btnDebugToggle.classList.toggle('active', open);
-    if (open) setSearchDrawerOpen(false);
+  function setMenuDrawerOpen(open) {
+    state.menuOpen = Boolean(open);
+    dom.menuDrawer.classList.toggle('collapsed', !state.menuOpen);
+    dom.btnMenuToggle.classList.toggle('active', state.menuOpen);
+    dom.btnMenuToggle.setAttribute('aria-expanded', String(state.menuOpen));
   }
 
   function setPinMode(active) {
@@ -1817,12 +2128,12 @@
       state.map.getCanvas().style.cursor = active ? 'crosshair' : '';
     }
     if (active) {
-      setSearchDrawerOpen(false);
+      setMenuDrawerOpen(false);
       showToast('マップ上の任意の場所をタップして目的地を設定できます');
     }
   }
 
-  function renderPresetButtons(container, autoStartDemo) {
+  function renderPresetButtons(container) {
     container.innerHTML = '';
     CFG.demoPresets.forEach((preset) => {
       const btn = document.createElement('button');
@@ -1838,7 +2149,7 @@
       btn.querySelector('.preset-name').textContent = preset.name;
       btn.querySelector('.preset-desc').textContent = preset.desc;
       btn.querySelector('.preset-badge').textContent = preset.badge;
-      btn.addEventListener('click', () => loadDemoPreset(preset, autoStartDemo));
+      btn.addEventListener('click', () => loadDemoPreset(preset, true));
       container.appendChild(btn);
     });
   }
@@ -1861,12 +2172,13 @@
   }
 
   function bindUiEvents() {
-    dom.modeButtons.forEach((btn) => {
-      btn.addEventListener('click', () => setDrivingMode(btn.dataset.mode, true));
-    });
+    // Right Slim Dock (Items 2, 3, 4; Item 1 is non-button Clock)
+    dom.btnModeCycle.addEventListener('click', cycleDrivingMode);
+    dom.btnMenuToggle.addEventListener('click', () => setMenuDrawerOpen(!state.menuOpen));
+    dom.btnRecenter.addEventListener('click', () => setFollowCamera(true));
 
-    dom.btnDestToggle.addEventListener('click', () => setSearchDrawerOpen(!state.searchOpen));
-    dom.btnSearchClose.addEventListener('click', () => setSearchDrawerOpen(false));
+    // Menu Drawer Controls
+    dom.btnMenuClose.addEventListener('click', () => setMenuDrawerOpen(false));
     dom.searchForm.addEventListener('submit', (e) => {
       e.preventDefault();
       searchPlaces(dom.searchInput.value);
@@ -1874,6 +2186,7 @@
     dom.btnMapPinMode.addEventListener('click', () => setPinMode(!state.pinModeActive));
     dom.btnClearRoute.addEventListener('click', clearActiveRoute);
 
+    // Pin Confirmation
     dom.btnPinRoute.addEventListener('click', () => {
       if (state.pendingPin) {
         setDestinationAndFetchRoute(state.pendingPin.coords, state.pendingPin.name);
@@ -1881,6 +2194,7 @@
     });
     dom.btnPinCancel.addEventListener('click', clearPendingPin);
 
+    // System Utilities inside Menu Drawer
     dom.btnWakelock.addEventListener('click', () => {
       if (state.wakeLock.sentinel) {
         releaseWakeLock();
@@ -1888,13 +2202,13 @@
         requestWakeLock(false);
       }
     });
-    dom.btnRecenter.addEventListener('click', () => setFollowCamera(true));
     dom.btnFullscreen.addEventListener('click', toggleFullscreenLandscape);
-    dom.btnTokenSettings.addEventListener('click', () => openTokenModal(Boolean(state.accessToken)));
-    dom.btnDebugToggle.addEventListener('click', () => setDebugDrawerOpen(!state.debugOpen));
-    dom.btnDebugClose.addEventListener('click', () => setDebugDrawerOpen(false));
+    dom.btnTokenSettings.addEventListener('click', () => {
+      setMenuDrawerOpen(false);
+      openTokenModal(Boolean(state.accessToken));
+    });
 
-    // Debug: Demo Drive Toggle
+    // Demo Drive Toggle
     dom.toggleDemoMode.addEventListener('change', async () => {
       const enabled = dom.toggleDemoMode.checked;
       if (enabled && !state.routeModel) {
@@ -1910,7 +2224,7 @@
         state.vehicle.speedMps = state.sim.demoSpeedKmh / 3.6;
         state.gps.lastValidSpeedMps = state.vehicle.speedMps;
         setFollowCamera(true);
-        setSearchDrawerOpen(false);
+        setMenuDrawerOpen(false);
         showToast(`デモ走行 ON（${state.sim.demoSpeedKmh} km/h）`);
       } else {
         state.vehicle.speedMps = 0;
@@ -1949,20 +2263,28 @@
       state.autoCloseZoomActive = false;
       state.isCloseZoomActive = state.sim.forceCloseZoom;
       state.lastCamApplied = null;
+      resetMountainCurveDisplay();
       updateJctBeaconOnMap(null);
       syncRouteSourcesToMap();
       updateNavigationAnalytics();
+      evaluateElevationAndSeeThrough(performance.now(), true);
       evaluateCloseZoomEveryFrame(false);
+      evaluateMountainCurveThrottled(performance.now(), true);
       setFollowCamera(true);
       showToast('スタート地点へ戻しました');
     });
 
-    // Debug: Force Intersection / JCT 3D Zoom Toggle
+    // Underpass Overhead See-Through Force Toggle
+    dom.toggleUnderpassSeeThrough.addEventListener('change', () => {
+      setForceUnderpassSeeThrough(dom.toggleUnderpassSeeThrough.checked);
+    });
+
+    // Force Intersection / JCT 3D Zoom Toggle
     dom.toggleForceCloseZoom.addEventListener('change', () => {
       setForceCloseZoom(dom.toggleForceCloseZoom.checked);
     });
 
-    // Debug: Tunnel / GPS Lost Toggle
+    // Tunnel / GPS Lost Toggle
     dom.toggleTunnelSim.addEventListener('change', () => {
       const lost = dom.toggleTunnelSim.checked;
       state.sim.tunnelLost = lost;
@@ -1997,14 +2319,27 @@
     });
   }
 
+  // Read-only diagnostic hook for runtime inspection
+  window.__AERO_NAVI__ = {
+    getState: () => state,
+    getMap: () => state.map,
+    getCar3d: () => state.car3d,
+    evaluateMountainCurve: (ts, force) => evaluateMountainCurveThrottled(ts, force),
+    evaluateElevation: (ts, force) => evaluateElevationAndSeeThrough(ts, force),
+  };
+
   // =========================================================================
   // Bootstrap
   // =========================================================================
   function init() {
-    renderPresetButtons(dom.presetList, true);
-    renderPresetButtons(dom.debugPresetList, true);
+    updateLiveClock();
+    setInterval(updateLiveClock, 1000);
+
+    updateModeButtonsUi(state.mode);
+    renderPresetButtons(dom.presetList);
     bindUiEvents();
     updateGpsStatusUi();
+    updateElevationBadgeUi();
     refreshGuidanceUi();
 
     requestWakeLock(true);
