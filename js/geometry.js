@@ -755,23 +755,62 @@
   }
 
   /**
+   * Exact linear interpolation matching Mapbox paint expression:
+   *   ['interpolate', ['linear'], ['zoom'], 14, -2, 18, -6, 20, -12]
+   * Negative values shift strictly to the LEFT of travel direction (Japan left-hand driving lane).
+   */
+  function computeLeftLanePixelOffset(zoom) {
+    const z = Number.isFinite(zoom) ? zoom : 19.2;
+    if (z <= 14) return -2;
+    if (z <= 18) return -2 + ((z - 14) / 4) * (-6 - -2);
+    if (z <= 20) return -6 + ((z - 18) / 2) * (-12 - -6);
+    return -12;
+  }
+
+  /**
+   * Shift a road-centerline coordinate [lng, lat] strictly perpendicular-left (heading - 90°)
+   * by the exact geographic ground distance corresponding to Mapbox's `'line-offset'` at `zoom`.
+   * This keeps the native Mapbox ego vehicle Marker aligned dead-center on the left-lane route line
+   * across every zoom level, pitch angle, and camera bearing.
+   */
+  function offsetCoordsToLeftLane(coords, headingDeg, zoom, meterInMercatorUnits) {
+    if (!Array.isArray(coords) || coords.length < 2) return coords;
+    const pxOffset = computeLeftLanePixelOffset(zoom); // negative (left)
+    const absPx = Math.abs(pxOffset);
+    if (absPx < 0.05) return [coords[0], coords[1]];
+
+    const latRad = (coords[1] * Math.PI) / 180;
+    const mercMeters =
+      Number.isFinite(meterInMercatorUnits) && meterInMercatorUnits > 0
+        ? meterInMercatorUnits
+        : 1 / (40075016.686 * Math.max(0.1, Math.cos(latRad)));
+
+    // Mapbox GL JS v3 tile world size = 512 * 2^zoom CSS pixels per [0..1] Mercator span
+    const worldSizePx = 512 * Math.pow(2, Number.isFinite(zoom) ? zoom : 19.2);
+    const pixelsPerMeter = mercMeters * worldSizePx;
+    const offsetMeters = pixelsPerMeter > 0 ? absPx / pixelsPerMeter : 3.2;
+
+    const leftBearing = normalizeBearing((Number.isFinite(headingDeg) ? headingDeg : 0) - 90);
+    const shifted = turf.destination(turf.point(coords), offsetMeters / 1000, leftBearing, {
+      units: 'kilometers',
+    });
+    return shifted.geometry.coordinates;
+  }
+
+  /**
    * Determine whether the vehicle is driving ON an elevated highway/bridge ('elevated'),
    * UNDER an overpass on a surface road ('underpass'), or on a regular surface road ('surface').
    *
    * Combines:
-   *  - Active route step classes (`motorway`, `bridge`) & Highway mode
-   *  - Rendered map features near ego position (`structure: 'bridge'`, `layer > 0`, bridge/viaduct layer IDs)
+   *  - Per-frame map.queryRenderedFeatures(point) directly under ego coordinates
+   *    (`properties.structure === 'bridge'`, `properties.class === 'motorway'`, `layer > 0`, bridge/viaduct layer IDs)
+   *  - Active Directions API route step (`motorway`, `bridge`, expressway names) & Highway mode
    *  - Manual debug override (`forceUnderpass`)
    */
   function classifyElevationState({ modeId, activeStep, renderedFeatures, forceUnderpass }) {
-    if (forceUnderpass) {
-      return { state: 'underpass', hasBridgeOverhead: true, isHighwayRoute: false };
-    }
+    let hasBridgeUnderEgo = false;
+    let hasMotorwayUnderEgo = false;
 
-    const isHighwayRoute =
-      modeId === 'highway' || Boolean(activeStep && activeStep.isMotorwayOrElevated);
-
-    let hasBridgeFeature = false;
     if (Array.isArray(renderedFeatures)) {
       for (let i = 0; i < renderedFeatures.length; i++) {
         const f = renderedFeatures[i];
@@ -785,24 +824,56 @@
         if (
           structure === 'bridge' ||
           (Number.isFinite(zLayer) && zLayer > 0) ||
-          /(bridge|elevated|viaduct|overpass)/i.test(layerId) ||
-          (roadClass === 'motorway' && modeId !== 'highway')
+          /(bridge|elevated|viaduct|overpass)/i.test(layerId)
         ) {
-          hasBridgeFeature = true;
-          break;
+          hasBridgeUnderEgo = true;
+        }
+        if (roadClass === 'motorway') {
+          hasMotorwayUnderEgo = true;
         }
       }
     }
 
+    if (forceUnderpass) {
+      return {
+        state: 'underpass',
+        hasBridgeOverhead: true,
+        hasBridgeUnderEgo,
+        hasMotorwayUnderEgo,
+        isHighwayRoute: false,
+      };
+    }
+
+    const isHighwayRoute =
+      modeId === 'highway' || Boolean(activeStep && activeStep.isMotorwayOrElevated);
+
     if (isHighwayRoute) {
-      return { state: 'elevated', hasBridgeOverhead: hasBridgeFeature, isHighwayRoute: true };
+      return {
+        state: 'elevated',
+        hasBridgeOverhead: hasBridgeUnderEgo,
+        hasBridgeUnderEgo,
+        hasMotorwayUnderEgo,
+        isHighwayRoute: true,
+      };
     }
 
-    if (hasBridgeFeature) {
-      return { state: 'underpass', hasBridgeOverhead: true, isHighwayRoute: false };
+    if (hasBridgeUnderEgo || hasMotorwayUnderEgo) {
+      return {
+        state: 'underpass',
+        hasBridgeOverhead: true,
+        hasBridgeUnderEgo,
+        hasMotorwayUnderEgo,
+        isHighwayRoute: false,
+      };
     }
 
-    return { state: 'surface', hasBridgeOverhead: false, isHighwayRoute: false };
+    return {
+      state: 'surface',
+      hasBridgeOverhead: false,
+      hasBridgeUnderEgo: false,
+      hasMotorwayUnderEgo: false,
+      isHighwayRoute: false,
+    };
   }
 
   /**
@@ -903,6 +974,8 @@
     computeTargetPitch,
     analyzeMountainPaceNote,
     getActiveRouteStep,
+    computeLeftLanePixelOffset,
+    offsetCoordsToLeftLane,
     classifyElevationState,
     advanceDeadReckoning,
     sliceRouteProgress,

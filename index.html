@@ -7,7 +7,7 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="description" content="Mapbox GL JS v3 Standard Style・Three.js 3D自車・Turf.js による純正車載コックピット風 3D カーナビゲーションアプリ。左端物理ベゼル風タッチバー、路面密着3D車両、高架下シースルー透過、半透明車線ルート、山岳カーブ案内、自律航法対応。" />
+  <meta name="description" content="Mapbox GL JS v3 Standard Style と Turf.js による純正車載コックピット風 3D カーナビゲーションアプリ。左端物理ベゼル風タッチバー、Mapboxネイティブ接地3D自車、左側走行車線オフセット、高架上スナップ＆高架下シースルー透過、山岳カーブ案内、自律航法対応。" />
   <title>AERO-DRIVE | 3D Cockpit Navigation</title>
 
   <link rel="manifest" href="./manifest.json" />
@@ -24,9 +24,6 @@
 
   <!-- Turf.js v6 -->
   <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
-
-  <!-- Three.js (3D Ego Vehicle Custom Layer) -->
-  <script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"></script>
 
   <link rel="stylesheet" href="./styles.css" />
 </head>
@@ -403,7 +400,6 @@
   <!-- Application Scripts -->
   <script src="./js/config.js"></script>
   <script src="./js/geometry.js"></script>
-  <script src="./js/car3d-layer.js"></script>
   <script src="./js/app.js"></script>
 </body>
 </html>

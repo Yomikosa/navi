@@ -3,7 +3,8 @@
  *
  * Stack:
  *  - Mapbox GL JS v3 (mapbox://styles/mapbox/standard, night lightPreset, 3D objects)
- *  - Three.js Custom WebGL 3D Car Layer (js/car3d-layer.js)
+ *  - Native Mapbox 3D-Perspective Vehicle Marker (pitchAlignment: 'map', rotationAlignment: 'map')
+ *  - Japan Left-Hand Driving Lane Offset + Overpass Top-Overlay & Underpass See-Through
  *  - Turf.js v6 (js/geometry.js)
  *  - Mapbox Geocoding API + Directions API (mapbox/driving) + Screen Wake Lock API
  */
@@ -14,6 +15,10 @@
   const CFG = window.APP_CONFIG;
   const MODE_ORDER = ['city', 'highway', 'mountain'];
   const UNDERPASS_OPACITY = 0.22;
+
+  // Japan left-hand driving lane route styling (negative offset = left of travel direction)
+  const LEFT_LANE_LINE_OFFSET = ['interpolate', ['linear'], ['zoom'], 14, -2, 18, -6, 20, -12];
+  const LEFT_LANE_LINE_WIDTH = ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18];
 
   // =========================================================================
   // Application State
@@ -32,12 +37,13 @@
     closeZoomStep: null,
     lastManeuverDirectDistM: Infinity,
 
-    // Overpass vs Underpass See-Through Manager (strictly road-surface clamped, zero Z lift)
+    // Overpass ("高架上") vs Underpass ("高架下") Hit-Test & Overlay Manager
     elevation: {
       state: 'surface', // 'surface' | 'elevated' | 'underpass'
       hasBridgeOverhead: false,
+      hasBridgeUnderEgo: false,
+      hasMotorwayUnderEgo: false,
       isHighwayRoute: false,
-      lastCheckTs: 0,
       groundElevationM: 0,
       show3dObjectsApplied: true,
       dimmedBridgeLayers: new Map(),
@@ -59,6 +65,7 @@
     currentZoom: CFG.modes.city.baseZoom,
     currentPitch: CFG.modes.city.pitch,
     displayCoords: [...CFG.defaultCenter],
+    displayLaneCoords: [...CFG.defaultCenter],
     displayHeading: CFG.defaultBearing,
     lastCamApplied: null,
 
@@ -93,8 +100,10 @@
     destination: null, // { name, coords }
     navProgress: null,
 
-    // 3D Car Layer & Destination Pin Markers
-    car3d: null,
+    // Native Mapbox Ego Vehicle Marker & Destination Pin Markers
+    egoMarker: null,
+    egoMarkerEl: null,
+    egoCarInnerEl: null,
     destMarker: null,
     pinModeActive: false,
     pendingPin: null,
@@ -432,7 +441,9 @@
       state.map.remove();
       state.map = null;
       state.mapReady = false;
-      state.car3d = null;
+      state.egoMarker = null;
+      state.egoMarkerEl = null;
+      state.egoCarInnerEl = null;
       state.lastCamApplied = null;
       state.elevation.dimmedBridgeLayers.clear();
       state.elevation.show3dObjectsApplied = true;
@@ -442,7 +453,7 @@
   }
 
   // =========================================================================
-  // Mapbox GL JS v3 Standard Style Initialization, Route Layers & 3D Car
+  // Mapbox GL JS v3 Standard Style Initialization, Left-Lane Routes & Native 3D Marker
   // =========================================================================
 
   /**
@@ -456,6 +467,29 @@
       left: 0,
       right: 0,
     };
+  }
+
+  /**
+   * 道路中央線座標を日本の左側走行車線（進行方向左へ line-offset 相当）へ正確にシフト
+   */
+  function shouldApplyLeftLaneShift() {
+    return Boolean((state.routeModel && state.vehicle.isSnappedToRoute) || !state.gps.hasFix);
+  }
+
+  function computeLeftLaneCoords(centerCoords, headingDeg, zoom) {
+    if (!shouldApplyLeftLaneShift()) {
+      return [centerCoords[0], centerCoords[1]];
+    }
+    const merc =
+      window.mapboxgl && window.mapboxgl.MercatorCoordinate
+        ? mapboxgl.MercatorCoordinate.fromLngLat(centerCoords)
+        : null;
+    return Geo.offsetCoordsToLeftLane(
+      centerCoords,
+      headingDeg,
+      zoom,
+      merc ? merc.meterInMercatorCoordinateUnits() : null
+    );
   }
 
   function initMapbox() {
@@ -513,24 +547,29 @@
         map.setConfigProperty('basemap', 'showHdRoads', true);
       } catch (_err) {}
 
-      // ソース・ルートレイヤー・3D自車カスタムレイヤーを style.load 完了後に追加
+      // ソース・左車線ルートレイヤー・Mapboxネイティブ3D車両マーカーを style.load 完了後に追加
       setupTerrainAndRouteSources(map);
       setupRouteLayers(map);
-      setupEgo3DCarLayer(map);
+      state.displayLaneCoords = computeLeftLaneCoords(
+        state.displayCoords,
+        state.displayHeading,
+        state.currentZoom
+      );
+      setupEgoVehicleMarker(map);
 
       state.mapReady = true;
 
       // 初回パディング・カメラ・地形・高架状態を適用
       const pad = getCockpitPadding();
       map.jumpTo({
-        center: state.displayCoords,
+        center: state.displayLaneCoords,
         bearing: state.displayHeading,
         zoom: state.currentZoom,
         pitch: state.currentPitch,
         padding: pad,
       });
       recordCameraSnapshot(
-        state.displayCoords,
+        state.displayLaneCoords,
         state.displayHeading,
         state.currentZoom,
         state.currentPitch,
@@ -590,12 +629,13 @@
   }
 
   /**
-   * 路面標示（白線・進行矢印）を隠さない半透明＆車線幅スリムルート描画：
-   *  - slot: 'middle'（道路ポリゴン表面へ密着、浮き上がり防止のため line-z-offset 非使用）
-   *  - line-color: '#3b82f6'
-   *  - line-opacity: 0.55
-   *  - line-width: ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18]
-   *  - line-occlusion-opacity + 高架下時のみ表示される X-Ray レイヤー
+   * 日本の左側走行車線オフセット（line-offset）＋ 半透明スリムルート ＋ 高架上オーバーレイ描画：
+   *  - 'line-offset': ['interpolate', ['linear'], ['zoom'], 14, -2, 18, -6, 20, -12]（進行方向左車線へシフト）
+   *  - 'line-width':  ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18]
+   *  - 'line-opacity': 0.55
+   *  - 通常走行時: slot: 'middle'（路面標示や進行矢印の下に敷く）
+   *  - 高架区間走行時: route-elevated-top (slot: 'top') を動的表示し、3D高架ポリゴン上面に吸着表示
+   *  - 高架下走行時: show3dObjects=false＋透過＋route-xray-underpass で下道左車線を確実に視認可能
    */
   function setupRouteLayers(map) {
     if (!map.getLayer('route-traveled-line')) {
@@ -612,6 +652,7 @@
           'line-color': '#3b82f6',
           'line-opacity': 0.2,
           'line-width': ['interpolate', ['linear'], ['zoom'], 14, 3, 18, 8, 20, 14],
+          'line-offset': LEFT_LANE_LINE_OFFSET,
           'line-emissive-strength': 1,
           'line-occlusion-opacity': 0.3,
         },
@@ -631,7 +672,8 @@
         paint: {
           'line-color': '#3b82f6',
           'line-opacity': 0.55,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18],
+          'line-width': LEFT_LANE_LINE_WIDTH,
+          'line-offset': LEFT_LANE_LINE_OFFSET,
           'line-emissive-strength': 1,
           'line-occlusion-opacity': 0.45,
         },
@@ -651,9 +693,33 @@
         paint: {
           'line-color': '#60a5fa',
           'line-opacity': 0.45,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18],
+          'line-width': LEFT_LANE_LINE_WIDTH,
+          'line-offset': LEFT_LANE_LINE_OFFSET,
           'line-emissive-strength': 1,
           'line-occlusion-opacity': 0.5,
+        },
+      });
+    }
+
+    // 高架区間走行時のみ有効化する slot: 'top' 高架上面オーバーレイレイヤー
+    if (!map.getLayer('route-elevated-top')) {
+      map.addLayer({
+        id: 'route-elevated-top',
+        type: 'line',
+        slot: 'top',
+        source: 'route-remaining',
+        layout: {
+          'line-join': 'round',
+          'line-cap': 'round',
+          visibility: 'none',
+        },
+        paint: {
+          'line-color': '#3b82f6',
+          'line-opacity': 0.55,
+          'line-width': LEFT_LANE_LINE_WIDTH,
+          'line-offset': LEFT_LANE_LINE_OFFSET,
+          'line-emissive-strength': 1,
+          'line-occlusion-opacity': 0.65,
         },
       });
     }
@@ -672,8 +738,9 @@
         },
         paint: {
           'line-color': '#60a5fa',
-          'line-opacity': 0.42,
-          'line-width': ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18],
+          'line-opacity': 0.45,
+          'line-width': LEFT_LANE_LINE_WIDTH,
+          'line-offset': LEFT_LANE_LINE_OFFSET,
           'line-dasharray': [2, 1.5],
           'line-emissive-strength': 1,
           'line-occlusion-opacity': 0.65,
@@ -700,29 +767,104 @@
   }
 
   /**
-   * 2Dマーカーを廃止し、Three.js Custom 3D Layer による立体的な3D車両モデルを配置
+   * Mapboxネイティブ描画（mapboxgl.Marker, pitchAlignment:'map', rotationAlignment:'map'）による
+   * 高精細3Dパース付き自車オブジェクト。Terrain・高架・カメラ傾きに完全同期し浮き・沈みゼロ。
    */
-  function setupEgo3DCarLayer(map) {
-    if (!window.Car3DLayer || !window.THREE) {
-      return;
-    }
-    if (map.getLayer('ego-car-3d-layer')) {
-      try {
-        map.removeLayer('ego-car-3d-layer');
-      } catch (_err) {}
+  function setupEgoVehicleMarker(map) {
+    if (state.egoMarker) {
+      state.egoMarker.remove();
+      state.egoMarker = null;
     }
 
-    state.car3d = window.Car3DLayer.createCar3DLayer({
-      id: 'ego-car-3d-layer',
-      initialCoords: state.displayCoords,
-      initialHeading: state.displayHeading,
-    });
+    const el = document.createElement('div');
+    el.className = 'ego-vehicle-marker';
+    el.setAttribute('aria-hidden', 'true');
+    el.innerHTML = `
+      <div class="ego-car-inner">
+        <svg viewBox="0 0 80 136" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="egoBeam" x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0%" stop-color="#e0f2fe" stop-opacity="0.42"/>
+              <stop offset="100%" stop-color="#60a5fa" stop-opacity="0"/>
+            </linearGradient>
+            <linearGradient id="egoBody" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#94a3b8"/>
+              <stop offset="18%" stop-color="#e2e8f0"/>
+              <stop offset="50%" stop-color="#f8fafc"/>
+              <stop offset="82%" stop-color="#e2e8f0"/>
+              <stop offset="100%" stop-color="#94a3b8"/>
+            </linearGradient>
+            <linearGradient id="egoRoof" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#f8fafc"/>
+              <stop offset="100%" stop-color="#cbd5e1"/>
+            </linearGradient>
+            <linearGradient id="egoGlass" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#1e293b"/>
+              <stop offset="50%" stop-color="#0f172a"/>
+              <stop offset="100%" stop-color="#020617"/>
+            </linearGradient>
+            <radialGradient id="egoShadow" cx="50%" cy="52%" r="50%">
+              <stop offset="55%" stop-color="#000000" stop-opacity="0.62"/>
+              <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
 
-    try {
-      map.addLayer(state.car3d.layer);
-    } catch (_err) {
-      state.car3d = null;
-    }
+          <!-- Subtle forward LED headlight beam -->
+          <path d="M21 26 L8 0 L72 0 L59 26 Z" fill="url(#egoBeam)"/>
+
+          <!-- Ground contact shadow -->
+          <ellipse cx="40" cy="76" rx="28" ry="52" fill="url(#egoShadow)"/>
+
+          <!-- Side wing mirrors -->
+          <path d="M16 54 L9 58 L11 63 L18 61 Z" fill="#cbd5e1" stroke="#475569" stroke-width="0.8"/>
+          <path d="M64 54 L71 58 L69 63 L62 61 Z" fill="#cbd5e1" stroke="#475569" stroke-width="0.8"/>
+
+          <!-- Sculpted lower chassis & outer body shell -->
+          <path d="M22 24 C28 18 52 18 58 24 C63 29 65 40 65 56 L65 104 C65 117 61 124 55 126 L25 126 C19 124 15 117 15 104 L15 56 C15 40 17 29 22 24 Z" fill="url(#egoBody)" stroke="#64748b" stroke-width="1.2"/>
+
+          <!-- Sculpted hood aerodynamic lines -->
+          <path d="M26 27 L29 48 M54 27 L51 48" stroke="#94a3b8" stroke-width="1" stroke-opacity="0.65" stroke-linecap="round"/>
+
+          <!-- Panoramic tinted cabin (windshield + side windows + fastback rear glass) -->
+          <path d="M23 50 C28 45 52 45 57 50 L59 95 C56 105 51 110 40 110 C29 110 24 105 21 95 Z" fill="url(#egoGlass)" stroke="#334155" stroke-width="1"/>
+
+          <!-- Windshield specular reflection -->
+          <path d="M27 52 C33 48.5 47 48.5 53 52 L51 58 C45 55.5 35 55.5 29 58 Z" fill="#93c5fd" fill-opacity="0.22"/>
+
+          <!-- Elevated 3D roof panel -->
+          <rect x="25" y="62" width="30" height="31" rx="8" fill="url(#egoRoof)" stroke="#94a3b8" stroke-width="0.9"/>
+
+          <!-- Dual LED Headlights -->
+          <path d="M19 29 C22 24 27 23 31 24 L29 29 Z" fill="#f8fafc"/>
+          <path d="M61 29 C58 24 53 23 49 24 L51 29 Z" fill="#f8fafc"/>
+
+          <!-- Full-width signature LED Tail-light Bar (turns amber in Dead Reckoning) -->
+          <rect class="ego-taillight" x="19" y="120" width="42" height="4.2" rx="2.1"/>
+        </svg>
+      </div>
+    `;
+
+    state.egoMarkerEl = el;
+    state.egoCarInnerEl = el.querySelector('.ego-car-inner');
+    state.egoMarker = new mapboxgl.Marker({
+      element: el,
+      pitchAlignment: 'map',
+      rotationAlignment: 'map',
+      anchor: 'center',
+    })
+      .setLngLat(state.displayLaneCoords)
+      .setRotation(state.displayHeading)
+      .addTo(map);
+  }
+
+  function syncEgoMarkerScaleAndClasses(zoom) {
+    if (!state.egoMarkerEl || !state.egoCarInnerEl) return;
+    const z = Number.isFinite(zoom) ? zoom : state.currentZoom;
+    const scale = Geo.clamp(0.62 + (z - 16.5) * 0.11, 0.56, 1.08);
+    state.egoCarInnerEl.style.transform = `scale(${scale.toFixed(3)})`;
+    state.egoMarkerEl.classList.toggle('is-dr', state.gps.isDeadReckoning);
+    state.egoMarkerEl.classList.toggle('is-underpass', state.elevation.state === 'underpass');
+    state.egoMarkerEl.classList.toggle('is-elevated', state.elevation.state === 'elevated');
   }
 
   function updateDestinationMarker(coords) {
@@ -743,19 +885,20 @@
   }
 
   // =========================================================================
-  // Overpass ("上") vs Underpass ("下") Detection & Overhead See-Through
+  // Per-Frame Ground / Bridge Hit-Test (`queryRenderedFeatures`) & Overlays
   // =========================================================================
-  function queryRenderedRoadFeaturesNearEgo(map) {
-    if (!map || !state.mapReady) return [];
+  function queryRenderedRoadFeaturesAtEgo(map, lngLat) {
+    if (!map || !state.mapReady || !Array.isArray(lngLat)) return [];
     try {
-      const pt = map.project(state.displayCoords);
+      const pt = map.project(lngLat);
       if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return [];
-      const padPx = 24;
-      const bbox = [
-        [pt.x - padPx, pt.y - padPx],
-        [pt.x + padPx, pt.y + padPx],
-      ];
-      return map.queryRenderedFeatures(bbox) || [];
+      const pad = 16;
+      return (
+        map.queryRenderedFeatures([
+          [pt.x - pad, pt.y - pad],
+          [pt.x + pad, pt.y + pad],
+        ]) || []
+      );
     } catch (_err) {
       return [];
     }
@@ -768,9 +911,9 @@
       'route-traveled-line',
       'route-core-ribbon',
       'jct-segment-core',
+      'route-elevated-top',
       'route-xray-underpass',
       'jct-focus-ring',
-      'ego-car-3d-layer',
     ]);
 
     if (!dimmed) {
@@ -830,6 +973,7 @@
 
   function applyElevationVisuals(elevState) {
     const map = state.map;
+    const isElevated = elevState === 'elevated';
     const isUnderpass = elevState === 'underpass';
 
     if (!map || !state.mapReady) {
@@ -840,7 +984,7 @@
     // 1. Scan and dim classic/custom bridge layers (0.22 opacity) when underpass, or restore
     setStyleBridgeLayersOpacity(map, isUnderpass);
 
-    // 2. Mapbox Standard Style basemap: temporarily flatten overhead 3D structures in underpass mode
+    // 2. Mapbox Standard Style basemap: disable 3D overpass objects while driving underneath
     const desiredShow3d = !isUnderpass;
     if (state.elevation.show3dObjectsApplied !== desiredShow3d) {
       try {
@@ -849,22 +993,29 @@
       } catch (_e) {}
     }
 
-    // 3. Toggle X-Ray occlusion route overlay for underpass see-through clarity
+    // 3. Elevated Overpass Snapping: enable slot:'top' overlay while driving ON elevated bridges/highways
+    if (map.getLayer('route-elevated-top')) {
+      try {
+        map.setLayoutProperty('route-elevated-top', 'visibility', isElevated ? 'visible' : 'none');
+      } catch (_e) {}
+    }
+
+    // 4. Underpass X-Ray occlusion overlay for lower surface road visibility
     if (map.getLayer('route-xray-underpass')) {
       try {
         map.setLayoutProperty('route-xray-underpass', 'visibility', isUnderpass ? 'visible' : 'none');
       } catch (_e) {}
     }
 
+    syncEgoMarkerScaleAndClasses(map.getZoom());
     updateElevationBadgeUi();
   }
 
-  function evaluateElevationAndSeeThrough(nowTs, forceImmediate = false) {
-    if (!forceImmediate && nowTs - state.elevation.lastCheckTs < 350) {
-      return;
-    }
-    state.elevation.lastCheckTs = nowTs;
-
+  /**
+   * 毎フレーム自車座標 (map.project(lngLat)) に対して map.queryRenderedFeatures(point) を実行し、
+   * 直下フィーチャーの structure === 'bridge' / class === 'motorway' とルート属性から高架判定を行う。
+   */
+  function evaluateElevationAndSeeThrough(_nowTs, forceImmediate = false) {
     const activeStep = state.routeModel
       ? Geo.getActiveRouteStep(state.routeModel, state.vehicle.routeDistKm)
       : null;
@@ -872,7 +1023,7 @@
     const renderedFeatures =
       state.sim.forceUnderpassSeeThrough || !state.mapReady
         ? []
-        : queryRenderedRoadFeaturesNearEgo(state.map);
+        : queryRenderedRoadFeaturesAtEgo(state.map, state.displayLaneCoords);
 
     const res = Geo.classifyElevationState({
       modeId: state.mode,
@@ -883,6 +1034,8 @@
 
     const changed = res.state !== state.elevation.state;
     state.elevation.hasBridgeOverhead = res.hasBridgeOverhead;
+    state.elevation.hasBridgeUnderEgo = res.hasBridgeUnderEgo;
+    state.elevation.hasMotorwayUnderEgo = res.hasMotorwayUnderEgo;
     state.elevation.isHighwayRoute = res.isHighwayRoute;
 
     if (changed || forceImmediate) {
@@ -1092,9 +1245,10 @@
     }
 
     const pad = getCockpitPadding();
+    const laneTargetCenter = computeLeftLaneCoords(targetCenter, targetBearing, targetZoom);
     clearTimeout(state.easeTimer);
     state.map.easeTo({
-      center: targetCenter,
+      center: laneTargetCenter,
       bearing: targetBearing,
       zoom: targetZoom,
       pitch: targetPitch,
@@ -1103,7 +1257,7 @@
       easing: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
       essential: true,
     });
-    recordCameraSnapshot(targetCenter, targetBearing, targetZoom, targetPitch, pad.top);
+    recordCameraSnapshot(laneTargetCenter, targetBearing, targetZoom, targetPitch, pad.top);
 
     state.easeTimer = setTimeout(() => {
       state.isEasingCamera = false;
@@ -1868,37 +2022,41 @@
       }
     }
 
-    // 2. Per-frame turf.distance proximity check & throttled Mountain Curve / Elevation checks
+    // 2. Smooth display interpolation & left-lane coordinate alignment at live map zoom
+    const smoothFactor = Math.min(1, dtSec * 10);
+    state.displayCoords[0] += (state.vehicle.coords[0] - state.displayCoords[0]) * smoothFactor;
+    state.displayCoords[1] += (state.vehicle.coords[1] - state.displayCoords[1]) * smoothFactor;
+    state.displayHeading = Geo.lerpBearing(state.displayHeading, state.vehicle.heading, smoothFactor);
+
+    const liveZoom = state.map && state.mapReady ? state.map.getZoom() : state.currentZoom;
+    state.displayLaneCoords = computeLeftLaneCoords(
+      state.displayCoords,
+      state.displayHeading,
+      liveZoom
+    );
+
+    // 3. Per-frame turf.distance proximity check, per-frame queryRenderedFeatures hit-test & Mountain curve check
     if (state.routeModel) {
       evaluateCloseZoomEveryFrame(true);
     }
     evaluateElevationAndSeeThrough(ts, false);
     evaluateMountainCurveThrottled(ts, false);
 
-    // 3. Smooth display interpolation & 3D Car Pose + dirty-checked Camera update
-    const smoothFactor = Math.min(1, dtSec * 10);
-    state.displayCoords[0] += (state.vehicle.coords[0] - state.displayCoords[0]) * smoothFactor;
-    state.displayCoords[1] += (state.vehicle.coords[1] - state.displayCoords[1]) * smoothFactor;
-    state.displayHeading = Geo.lerpBearing(state.displayHeading, state.vehicle.heading, smoothFactor);
-
+    // 4. Native Mapbox Marker update & dirty-checked Camera update
     if (state.map && state.mapReady) {
       const groundElev =
         (typeof state.map.queryTerrainElevation === 'function'
-          ? state.map.queryTerrainElevation(state.displayCoords, { exaggerated: false })
+          ? state.map.queryTerrainElevation(state.displayLaneCoords, { exaggerated: false })
           : 0) || 0;
       state.elevation.groundElevationM = groundElev;
       if (state.mode === 'mountain') {
         state.vehicle.altitudeM = Math.round(groundElev);
       }
 
-      if (state.car3d) {
-        state.car3d.updatePose({
-          lng: state.displayCoords[0],
-          lat: state.displayCoords[1],
-          heading: state.displayHeading,
-          isDeadReckoning: state.gps.isDeadReckoning,
-          underpassSeeThrough: state.elevation.state === 'underpass',
-        });
+      if (state.egoMarker) {
+        state.egoMarker.setLngLat(state.displayLaneCoords);
+        state.egoMarker.setRotation(state.displayHeading);
+        syncEgoMarkerScaleAndClasses(liveZoom);
       }
 
       if (state.followCamera && !state.isEasingCamera) {
@@ -1915,9 +2073,14 @@
         state.currentPitch += (desiredPitch - state.currentPitch) * zoomLerp;
 
         const pad = getCockpitPadding();
+        const camLaneCoords = computeLeftLaneCoords(
+          state.displayCoords,
+          state.displayHeading,
+          state.currentZoom
+        );
         if (
           cameraHasChanged(
-            state.displayCoords,
+            camLaneCoords,
             state.displayHeading,
             state.currentZoom,
             state.currentPitch,
@@ -1925,14 +2088,14 @@
           )
         ) {
           state.map.jumpTo({
-            center: state.displayCoords,
+            center: camLaneCoords,
             bearing: state.displayHeading,
             zoom: state.currentZoom,
             pitch: state.currentPitch,
             padding: pad,
           });
           recordCameraSnapshot(
-            state.displayCoords,
+            camLaneCoords,
             state.displayHeading,
             state.currentZoom,
             state.currentPitch,
@@ -2296,7 +2459,8 @@
   window.__AERO_NAVI__ = {
     getState: () => state,
     getMap: () => state.map,
-    getCar3d: () => state.car3d,
+    getEgoMarker: () => state.egoMarker,
+    getDisplayLaneCoords: () => state.displayLaneCoords,
     evaluateMountainCurve: (ts, force) => evaluateMountainCurveThrottled(ts, force),
     evaluateElevation: (ts, force) => evaluateElevationAndSeeThrough(ts, force),
   };
