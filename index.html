@@ -7,7 +7,7 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="description" content="Mapbox GL JS v3 Standard Style と Turf.js による純正車載コックピット風 3D カーナビゲーションアプリ。左端物理ベゼル風タッチバー、Mapboxネイティブ接地3D自車、左側走行車線オフセット、高架上スナップ＆高架下シースルー透過、山岳カーブ案内、自律航法対応。" />
+  <meta name="description" content="Mapbox GL JS v3 Standard Style・Three.js WebGL 3D自車・Turf.js による純正車載コックピット風 3D カーナビゲーションアプリ。左端物理ベゼル風タッチバー、全画面ナビメニュー、-3.5m左車線オフセット、距離連動Smoothstep連続カメラ補間、自律航法対応。" />
   <title>AERO-DRIVE | 3D Cockpit Navigation</title>
 
   <link rel="manifest" href="./manifest.json" />
@@ -25,23 +25,20 @@
   <!-- Turf.js v6 -->
   <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 
+  <!-- Three.js (WebGL 3D Ego Vehicle Custom Layer) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js"></script>
+
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <main id="cockpit-app" aria-label="3D 車載デジタルコックピット ナビゲーション">
     <!-- ================================================================
          LEFT EDGE: OEM Hardware Capacitive Touch Bezel (Full-Height Black Bar)
-         Strictly 4 touch items top-to-bottom:
-         1. Clock (non-button)
-         2. Mode Cycle (CITY -> HIGHWAY -> MOUNTAIN)
-         3. Menu Drawer Toggle (slides out from right edge of bezel)
-         4. Recenter Ego Camera
+         1. Clock (non-button)  2. Mode Cycle  3. Full-Screen Menu  4. Recenter
          ================================================================ -->
     <aside id="nav-bezel" class="nav-bezel" aria-label="車載ナビ タッチベゼル">
-      <!-- 1. Clock (non-button) -->
       <div id="bezel-clock" class="bezel-clock tabular-nums" aria-label="現在時刻">--:--</div>
 
-      <!-- 2. Mode Cycle Capacitive Touch Area -->
       <button
         id="btn-mode-cycle"
         type="button"
@@ -53,14 +50,13 @@
         <span id="mode-cycle-label" class="bezel-label">CITY</span>
       </button>
 
-      <!-- 3. Menu Slide Drawer Capacitive Touch Area -->
       <button
         id="btn-menu-toggle"
         type="button"
         class="bezel-touch-btn"
         aria-expanded="false"
-        aria-controls="menu-drawer"
-        title="メニューを開く（目的地検索・デモ・設定）"
+        aria-controls="fullscreen-menu"
+        title="全画面ナビメニューを開く"
       >
         <span class="bezel-icon" aria-hidden="true">
           <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
@@ -70,7 +66,6 @@
         <span class="bezel-label">MENU</span>
       </button>
 
-      <!-- 4. Recenter Ego Capacitive Touch Area -->
       <button
         id="btn-recenter"
         type="button"
@@ -95,172 +90,6 @@
       <div id="map" role="application" aria-label="3D ナビゲーションマップ"></div>
 
       <!-- ==============================================================
-           SLIDE-OUT MENU DRAWER (Opens directly beside the Left Bezel)
-           ============================================================== -->
-      <aside id="menu-drawer" class="hud-panel menu-drawer collapsed" aria-label="ナビゲーションメニュー">
-        <div class="drawer-head">
-          <div class="drawer-title">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2.1" stroke-linecap="round">
-              <path d="M4 7h16M4 12h16M4 17h16" />
-            </svg>
-            <span>メニュー / 検索 / デバッグ</span>
-          </div>
-          <button id="btn-menu-close" type="button" class="icon-btn" aria-label="メニューを閉じる">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <!-- 1. Destination Search -->
-        <div class="control-group">
-          <div class="section-caption">目的地検索</div>
-          <form id="search-form" class="search-form" autocomplete="off">
-            <input
-              id="search-input"
-              type="search"
-              class="search-input"
-              placeholder="施設名・駅・IC名 (例: 東京駅)"
-              aria-label="目的地キーワード検索"
-            />
-            <button type="submit" class="btn-primary">検索</button>
-          </form>
-
-          <div style="display:flex; gap:6px;">
-            <button id="btn-map-pin-mode" type="button" class="btn-ghost" style="flex:1;">
-              <span>マップタップ指定</span>
-            </button>
-            <button id="btn-clear-route" type="button" class="btn-ghost btn-danger hidden">
-              <span>ルート解除</span>
-            </button>
-          </div>
-
-          <div id="search-results-section" class="hidden">
-            <div id="search-results-list" class="search-results-list"></div>
-          </div>
-        </div>
-
-        <!-- 2. Test Courses -->
-        <div class="control-group">
-          <div class="section-caption">テストコース（実ルート取得）</div>
-          <div id="preset-list" class="preset-list"></div>
-        </div>
-
-        <!-- 3. Virtual Driving Demo -->
-        <div class="control-group">
-          <div class="toggle-row">
-            <div class="toggle-label-wrap">
-              <div class="toggle-title">ルート仮想走行デモ</div>
-              <div class="toggle-desc">実ルート上を3D自車で自動走行</div>
-            </div>
-            <label class="switch" aria-label="ルート仮想走行デモ切替">
-              <input id="toggle-demo-mode" type="checkbox" />
-              <span class="switch-track"></span>
-            </label>
-          </div>
-
-          <div class="slider-head">
-            <span class="toggle-desc">仮想スピード (0〜150 km/h)</span>
-            <span id="demo-speed-label" class="slider-val">60 km/h</span>
-          </div>
-          <input
-            id="slider-demo-speed"
-            class="hud-slider"
-            type="range"
-            min="0"
-            max="150"
-            step="1"
-            value="60"
-            aria-label="仮想スピードスライダー"
-          />
-          <div class="speed-chips">
-            <button type="button" class="speed-chip-btn" data-speed="0">0</button>
-            <button type="button" class="speed-chip-btn" data-speed="45">45</button>
-            <button type="button" class="speed-chip-btn" data-speed="90">90</button>
-            <button type="button" class="speed-chip-btn" data-speed="130">130</button>
-          </div>
-
-          <button id="btn-demo-reset" type="button" class="btn-ghost" style="width:100%;">
-            <span>スタート地点へ戻す</span>
-          </button>
-        </div>
-
-        <!-- 4. Underpass Overhead See-Through Force Toggle -->
-        <div class="control-group">
-          <div class="toggle-row">
-            <div class="toggle-label-wrap">
-              <div class="toggle-title">高架下シースルー強制 ON/OFF</div>
-              <div class="toggle-desc">頭上高架の半透明化＋X-Ray透過を検証</div>
-            </div>
-            <label class="switch switch-amber" aria-label="高架下シースルー強制切替">
-              <input id="toggle-underpass-see-through" type="checkbox" />
-              <span class="switch-track"></span>
-            </label>
-          </div>
-        </div>
-
-        <!-- 5. Forced Intersection / JCT 3D Zoom -->
-        <div class="control-group">
-          <div class="toggle-row">
-            <div class="toggle-label-wrap">
-              <div class="toggle-title">強制JCT / 交差点3Dズーム</div>
-              <div class="toggle-desc">市街地(20.3/80°)・高速(19.5/78°)確認</div>
-            </div>
-            <label class="switch" aria-label="強制JCT交差点3Dズーム切替">
-              <input id="toggle-force-close-zoom" type="checkbox" />
-              <span class="switch-track"></span>
-            </label>
-          </div>
-        </div>
-
-        <!-- 6. Tunnel / GPS Lost Dead Reckoning -->
-        <div class="control-group">
-          <div class="toggle-row">
-            <div class="toggle-label-wrap">
-              <div class="toggle-title">トンネル進入（GPSロスト）</div>
-              <div class="toggle-desc">ルートスナップ自律航法を強制検証</div>
-            </div>
-            <label class="switch switch-amber" aria-label="トンネル進入GPSロスト切替">
-              <input id="toggle-tunnel-sim" type="checkbox" />
-              <span class="switch-track"></span>
-            </label>
-          </div>
-        </div>
-
-        <!-- 7. System Utilities -->
-        <div class="control-group">
-          <div class="section-caption">システム設定</div>
-          <div class="utility-grid-row">
-            <button id="btn-wakelock" type="button" class="btn-ghost" title="画面スリープ防止">
-              <span id="wakelock-label">WAKE</span>
-            </button>
-            <button id="btn-fullscreen" type="button" class="btn-ghost" title="フルスクリーン切替">
-              <span>全画面</span>
-            </button>
-            <button id="btn-token-settings" type="button" class="btn-ghost" title="Mapboxトークン設定">
-              <span>API KEY</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- 8. Live Telemetry -->
-        <div class="control-group">
-          <div class="section-caption">テレメトリ</div>
-          <div class="debug-telemetry-grid">
-            <div class="debug-kv"><span>ZOOM</span><span id="dbg-zoom">--</span></div>
-            <div class="debug-kv"><span>PITCH</span><span id="dbg-pitch">--</span></div>
-            <div class="debug-kv"><span>路面標高</span><span id="dbg-elev">0m</span></div>
-            <div class="debug-kv"><span>AUTO ZOOM</span><span id="dbg-auto-zoom">OFF</span></div>
-            <div class="debug-kv"><span>DR MODE</span><span id="dbg-dr-mode">OFF</span></div>
-            <div class="debug-kv"><span>分岐距離</span><span id="dbg-branch">--</span></div>
-          </div>
-          <div class="map-hint-note">
-            マップ上の任意の地点をタップまたは長押し(0.45秒)しても目的地を設定できます。
-          </div>
-        </div>
-      </aside>
-
-      <!-- ==============================================================
            TOP-CENTER: Mountain Mode Initial-D Simple Curve Icon ONLY
            ============================================================== -->
       <section class="mountain-curve-zone" aria-label="山岳カーブ案内" aria-live="polite">
@@ -275,10 +104,8 @@
 
       <!-- ==============================================================
            RIGHT EDGE (Pattern B): Tesla-Style Speed + Status + Next Turn Panel
-           Opposite side of the left hardware bezel for crystal-clear separation
            ============================================================== -->
       <aside id="tesla-panel" class="hud-panel tesla-panel" aria-label="速度計と次の案内">
-        <!-- Upper Block: Speedometer & Status Pills -->
         <section class="tesla-speed-block" aria-label="スピードメーター">
           <div class="speed-row">
             <div id="speed-value" class="speed-value tabular-nums">0</div>
@@ -305,7 +132,6 @@
 
         <div class="tesla-divider" aria-hidden="true"></div>
 
-        <!-- Lower Block: Next Turn / Branch Guidance -->
         <section class="tesla-guidance-block" aria-label="次のナビ案内" aria-live="polite">
           <div class="next-turn-head">
             <div id="maneuver-icon-box" class="maneuver-icon-box" aria-hidden="true"></div>
@@ -328,6 +154,356 @@
           </div>
         </section>
       </aside>
+
+      <!-- ==============================================================
+           FULL-SCREEN OEM AUTOMOTIVE NAVIGATION MENU OVERLAY
+           Covers entire map stage; Left Bezel stays accessible + large
+           top-right "× 地図へ戻る" button + 3 large category tabs:
+             1. 目的地 (Destination)
+             2. ルート編集 (Route Edit)
+             3. 設定・システム (Settings & Demo)
+           ============================================================== -->
+      <section
+        id="fullscreen-menu"
+        class="fullscreen-menu collapsed"
+        role="dialog"
+        aria-modal="true"
+        aria-label="車載ナビゲーション 全画面メニュー"
+      >
+        <!-- Top Header Bar -->
+        <header class="fs-menu-header">
+          <div class="fs-menu-title-group">
+            <h2 class="fs-menu-title">ナビゲーション メニュー</h2>
+            <span id="fs-menu-route-badge" class="fs-menu-badge">ルート未設定</span>
+          </div>
+          <button id="btn-menu-close" type="button" class="fs-back-map-btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+            <span>地図へ戻る</span>
+          </button>
+        </header>
+
+        <!-- Main Body: Left 3-Category Tab Rail + Right Content Stage -->
+        <div class="fs-menu-body">
+          <nav class="fs-menu-nav" aria-label="メニューカテゴリー" role="tablist">
+            <button
+              type="button"
+              id="tab-btn-destination"
+              class="fs-cat-btn active"
+              data-tab="destination"
+              role="tab"
+              aria-selected="true"
+              aria-controls="tab-panel-destination"
+            >
+              <span class="fs-cat-icon" aria-hidden="true">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 22s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12Z" />
+                  <circle cx="12" cy="10" r="2.5" />
+                </svg>
+              </span>
+              <span class="fs-cat-texts">
+                <span class="fs-cat-ja">目的地</span>
+                <span class="fs-cat-en">Destination</span>
+              </span>
+            </button>
+
+            <button
+              type="button"
+              id="tab-btn-route"
+              class="fs-cat-btn"
+              data-tab="route"
+              role="tab"
+              aria-selected="false"
+              aria-controls="tab-panel-route"
+            >
+              <span class="fs-cat-icon" aria-hidden="true">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="6" cy="19" r="3" />
+                  <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+                  <circle cx="18" cy="5" r="3" />
+                </svg>
+              </span>
+              <span class="fs-cat-texts">
+                <span class="fs-cat-ja">ルート編集</span>
+                <span class="fs-cat-en">Route Edit</span>
+              </span>
+            </button>
+
+            <button
+              type="button"
+              id="tab-btn-settings"
+              class="fs-cat-btn"
+              data-tab="settings"
+              role="tab"
+              aria-selected="false"
+              aria-controls="tab-panel-settings"
+            >
+              <span class="fs-cat-icon" aria-hidden="true">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+                </svg>
+              </span>
+              <span class="fs-cat-texts">
+                <span class="fs-cat-ja">設定・システム</span>
+                <span class="fs-cat-en">Settings &amp; Demo</span>
+              </span>
+            </button>
+          </nav>
+
+          <!-- Tab Content Area -->
+          <div class="fs-menu-stage">
+            <!-- ========================================================
+                 TAB 1: 目的地 (Destination)
+                 ======================================================== -->
+            <div id="tab-panel-destination" class="fs-tab-panel active" role="tabpanel" aria-labelledby="tab-btn-destination">
+              <div class="fs-card">
+                <div class="fs-card-header">
+                  <span class="section-caption">キーワード検索（Mapbox Geocoding）</span>
+                  <button id="btn-map-pin-mode" type="button" class="btn-outline-blue">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="12" cy="12" r="3" />
+                      <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
+                    </svg>
+                    <span>地図から選ぶ</span>
+                  </button>
+                </div>
+
+                <form id="search-form" class="search-form search-form-lg" autocomplete="off">
+                  <input
+                    id="search-input"
+                    type="search"
+                    class="search-input search-input-lg"
+                    placeholder="施設名・駅・住所・JCT名を入力 (例: 東京駅、大橋JCT)"
+                    aria-label="目的地キーワード検索"
+                  />
+                  <button type="submit" class="btn-primary btn-primary-lg">検索</button>
+                </form>
+
+                <div id="search-results-section" class="hidden">
+                  <div class="section-caption" style="margin-bottom:6px;">検索候補</div>
+                  <div id="search-results-list" class="search-results-list"></div>
+                </div>
+              </div>
+
+              <div class="fs-card">
+                <div class="section-caption">クイック目的地プリセット（ワンタップで3Dコース開始）</div>
+                <div id="preset-list" class="preset-tile-grid"></div>
+              </div>
+            </div>
+
+            <!-- ========================================================
+                 TAB 2: ルート編集 (Route Edit)
+                 ======================================================== -->
+            <div id="tab-panel-route" class="fs-tab-panel" role="tabpanel" aria-labelledby="tab-btn-route">
+              <div class="fs-card">
+                <div class="fs-card-header">
+                  <span class="section-caption">探索条件（ルート再検索）</span>
+                  <button id="btn-route-recalc" type="button" class="btn-outline-blue">
+                    <span>この条件で再検索</span>
+                  </button>
+                </div>
+
+                <div class="segmented-control" role="group" aria-label="ルート優先条件">
+                  <button type="button" id="btn-route-pref-highway" class="seg-btn active" data-pref="highway">
+                    高速道路 優先
+                  </button>
+                  <button type="button" id="btn-route-pref-local" class="seg-btn" data-pref="local">
+                    一般道 優先（有料回避）
+                  </button>
+                </div>
+              </div>
+
+              <div class="fs-card">
+                <div class="fs-card-header">
+                  <span class="section-caption">現在のルート行程（出発地・経由地・目的地）</span>
+                  <span id="route-edit-summary" class="route-edit-summary tabular-nums">ルート未設定</span>
+                </div>
+
+                <div id="route-timeline-list" class="route-timeline-list"></div>
+
+                <div class="waypoint-add-box">
+                  <div class="section-caption">経由地を追加</div>
+                  <form id="waypoint-search-form" class="search-form" autocomplete="off">
+                    <input
+                      id="waypoint-search-input"
+                      type="search"
+                      class="search-input"
+                      placeholder="経由したい場所を検索 (例: 渋谷駅、横浜駅)"
+                      aria-label="経由地キーワード検索"
+                    />
+                    <button type="submit" class="btn-primary">検索</button>
+                  </form>
+                  <div id="waypoint-results-list" class="search-results-list hidden"></div>
+                </div>
+
+                <div class="route-danger-row">
+                  <button id="btn-clear-route" type="button" class="btn-danger-lg hidden">
+                    現在のルートを消去（案内終了）
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- ========================================================
+                 TAB 3: 設定・システム (Settings & Demo)
+                 ======================================================== -->
+            <div id="tab-panel-settings" class="fs-tab-panel" role="tabpanel" aria-labelledby="tab-btn-settings">
+              <div class="fs-settings-grid">
+                <!-- Card A: Demo Simulation -->
+                <div class="fs-card">
+                  <div class="toggle-row">
+                    <div class="toggle-label-wrap">
+                      <div class="toggle-title">デモ走行（仮想シミュレーション）</div>
+                      <div class="toggle-desc">左車線シフト済み実ルート上を3D車両で自動走行</div>
+                    </div>
+                    <label class="switch" aria-label="ルート仮想走行デモ切替">
+                      <input id="toggle-demo-mode" type="checkbox" />
+                      <span class="switch-track"></span>
+                    </label>
+                  </div>
+
+                  <div class="slider-head">
+                    <span class="toggle-desc">仮想スピード (0〜150 km/h)</span>
+                    <span id="demo-speed-label" class="slider-val">60 km/h</span>
+                  </div>
+                  <input
+                    id="slider-demo-speed"
+                    class="hud-slider"
+                    type="range"
+                    min="0"
+                    max="150"
+                    step="1"
+                    value="60"
+                    aria-label="仮想スピードスライダー"
+                  />
+                  <div class="speed-chips">
+                    <button type="button" class="speed-chip-btn" data-speed="0">0</button>
+                    <button type="button" class="speed-chip-btn" data-speed="45">45</button>
+                    <button type="button" class="speed-chip-btn" data-speed="90">90</button>
+                    <button type="button" class="speed-chip-btn" data-speed="130">130</button>
+                  </div>
+
+                  <button id="btn-demo-reset" type="button" class="btn-ghost" style="width:100%;">
+                    <span>スタート地点へ戻す</span>
+                  </button>
+                </div>
+
+                <!-- Card B: 3D Vehicle Height Fine-Tune Slider (-5m .. +20m) -->
+                <div class="fs-card">
+                  <div class="fs-card-header">
+                    <div>
+                      <div class="toggle-title">車両の高さ（Z座標）微調整</div>
+                      <div class="toggle-desc">高架上などの接地微調整（-5.0m 〜 +20.0m）</div>
+                    </div>
+                    <button id="btn-car-height-reset" type="button" class="btn-ghost">0m リセット</button>
+                  </div>
+
+                  <div class="slider-head">
+                    <span class="toggle-desc">基準：地形標高 + オフセット</span>
+                    <span id="car-height-label" class="slider-val">0.0 m</span>
+                  </div>
+                  <input
+                    id="slider-car-height"
+                    class="hud-slider"
+                    type="range"
+                    min="-5"
+                    max="20"
+                    step="0.5"
+                    value="0"
+                    aria-label="車両の高さオフセット微調整スライダー"
+                  />
+                  <div class="slider-scale-marks">
+                    <span>-5m</span>
+                    <span>0m (路面)</span>
+                    <span>+10m</span>
+                    <span>+20m</span>
+                  </div>
+                </div>
+
+                <!-- Card C: Light Preset (Night / Dusk / Day) -->
+                <div class="fs-card">
+                  <div class="toggle-title">昼夜ライトプリセット（Mapbox Standard）</div>
+                  <div class="toggle-desc">3D 建物・高架橋・路面のライティングを切替</div>
+                  <div class="segmented-control segmented-3" role="group" aria-label="昼夜ライトプリセット">
+                    <button type="button" class="seg-btn light-preset-btn active" data-light-preset="night">Night</button>
+                    <button type="button" class="seg-btn light-preset-btn" data-light-preset="dusk">Dusk</button>
+                    <button type="button" class="seg-btn light-preset-btn" data-light-preset="day">Day</button>
+                  </div>
+                </div>
+
+                <!-- Card D: Driving Environment Toggles -->
+                <div class="fs-card">
+                  <div class="toggle-row">
+                    <div class="toggle-label-wrap">
+                      <div class="toggle-title">高架下シースルー表示 ON/OFF</div>
+                      <div class="toggle-desc">頭上高架の半透明化＋X-Ray透過を強制検証</div>
+                    </div>
+                    <label class="switch switch-amber" aria-label="高架下シースルー強制切替">
+                      <input id="toggle-underpass-see-through" type="checkbox" />
+                      <span class="switch-track"></span>
+                    </label>
+                  </div>
+
+                  <div class="tesla-divider"></div>
+
+                  <div class="toggle-row">
+                    <div class="toggle-label-wrap">
+                      <div class="toggle-title">トンネル進入（GPSロスト・自律航法）</div>
+                      <div class="toggle-desc">ルートスナップ自律航法（Dead Reckoning）を検証</div>
+                    </div>
+                    <label class="switch switch-amber" aria-label="トンネル進入GPSロスト切替">
+                      <input id="toggle-tunnel-sim" type="checkbox" />
+                      <span class="switch-track"></span>
+                    </label>
+                  </div>
+
+                  <div class="tesla-divider"></div>
+
+                  <div class="toggle-row">
+                    <div class="toggle-label-wrap">
+                      <div class="toggle-title">強制JCT / 交差点3Dズーム確認</div>
+                      <div class="toggle-desc">市街地(20.4/80°)・高速(19.5/78°)へ滑らかに接近</div>
+                    </div>
+                    <label class="switch" aria-label="強制JCT交差点3Dズーム切替">
+                      <input id="toggle-force-close-zoom" type="checkbox" />
+                      <span class="switch-track"></span>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Card E: System Utilities & Live Telemetry -->
+                <div class="fs-card fs-card-span2">
+                  <div class="fs-card-header">
+                    <span class="section-caption">システム設定 ＆ リアルタイム・テレメトリ</span>
+                    <div class="utility-inline-row">
+                      <button id="btn-wakelock" type="button" class="btn-ghost" title="画面スリープ防止">
+                        <span id="wakelock-label">WAKE</span>
+                      </button>
+                      <button id="btn-fullscreen" type="button" class="btn-ghost" title="フルスクリーン切替">
+                        <span>全画面</span>
+                      </button>
+                      <button id="btn-token-settings" type="button" class="btn-ghost" title="Mapboxトークン設定">
+                        <span>API KEY</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="debug-telemetry-grid telemetry-3col">
+                    <div class="debug-kv"><span>ZOOM</span><span id="dbg-zoom">--</span></div>
+                    <div class="debug-kv"><span>PITCH</span><span id="dbg-pitch">--</span></div>
+                    <div class="debug-kv"><span>接近補間 t</span><span id="dbg-approach">0.00</span></div>
+                    <div class="debug-kv"><span>路面標高</span><span id="dbg-elev">0m</span></div>
+                    <div class="debug-kv"><span>車両Z補正</span><span id="dbg-car-z">0.0m</span></div>
+                    <div class="debug-kv"><span>DR MODE</span><span id="dbg-dr-mode">OFF</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <!-- ==============================================================
            BOTTOM-CENTER MAP PIN CONFIRMATION & TOASTS
@@ -400,6 +576,7 @@
   <!-- Application Scripts -->
   <script src="./js/config.js"></script>
   <script src="./js/geometry.js"></script>
+  <script src="./js/car3d-layer.js"></script>
   <script src="./js/app.js"></script>
 </body>
 </html>

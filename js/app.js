@@ -2,11 +2,10 @@
  * AERO-DRIVE 3D Digital Cockpit — Application Controller
  *
  * Stack:
- *  - Mapbox GL JS v3 (mapbox://styles/mapbox/standard, night lightPreset, 3D objects)
- *  - Native Mapbox 3D-Perspective Vehicle Marker (pitchAlignment: 'map', rotationAlignment: 'map')
- *  - Japan Left-Hand Driving Lane Offset + Overpass Top-Overlay & Underpass See-Through
- *  - Turf.js v6 (js/geometry.js)
- *  - Mapbox Geocoding API + Directions API (mapbox/driving) + Screen Wake Lock API
+ *  - Mapbox GL JS v3 (mapbox://styles/mapbox/standard, Night/Dusk/Day lightPreset, 3D objects)
+ *  - Three.js Custom WebGL 3D Vehicle Layer (js/car3d-layer.js, Z=0 tire pivot + height fine-tune slider)
+ *  - Turf.js v6 (js/geometry.js: -3.5m turf.lineOffset left-lane route, Smoothstep continuous camera, DR)
+ *  - Commercial Automotive Full-Screen Menu (Destination / Route Edit w/ Waypoints / Settings & Demo)
  */
 (function () {
   'use strict';
@@ -15,10 +14,6 @@
   const CFG = window.APP_CONFIG;
   const MODE_ORDER = ['city', 'highway', 'mountain'];
   const UNDERPASS_OPACITY = 0.22;
-
-  // Japan left-hand driving lane route styling (negative offset = left of travel direction)
-  const LEFT_LANE_LINE_OFFSET = ['interpolate', ['linear'], ['zoom'], 14, -2, 18, -6, 20, -12];
-  const LEFT_LANE_LINE_WIDTH = ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18];
 
   // =========================================================================
   // Application State
@@ -31,13 +26,24 @@
     // Active driving mode: 'city' | 'highway' | 'mountain'
     mode: 'city',
 
-    // Auto / Forced Close-Range 3D Zoom state (City <=150m, Highway <=800m)
-    autoCloseZoomActive: false,
-    isCloseZoomActive: false,
-    closeZoomStep: null,
-    lastManeuverDirectDistM: Infinity,
+    // Continuous Smoothstep + 0.08 Damping Camera Controller (zero abrupt jumps)
+    followCamera: true,
+    cam: {
+      center: [...CFG.defaultCenter],
+      bearing: CFG.defaultBearing,
+      zoom: CFG.modes.city.baseZoom,
+      pitch: CFG.modes.city.pitch,
+      targetZoom: CFG.modes.city.baseZoom,
+      targetPitch: CFG.modes.city.pitch,
+      approachT: 0,
+      easedT: 0,
+      isApproaching: false,
+      approachStep: null,
+      lastManeuverDistM: Infinity,
+      lastApplied: null,
+    },
 
-    // Overpass ("高架上") vs Underpass ("高架下") Hit-Test & Overlay Manager
+    // Overpass vs Underpass Hit-Test & See-Through Manager
     elevation: {
       state: 'surface', // 'surface' | 'elevated' | 'underpass'
       hasBridgeOverhead: false,
@@ -58,18 +64,9 @@
       lockDurationMs: 2500,
     },
 
-    // Camera tracking & dirty-check snapshot (prevents jumpTo spam when idle)
-    followCamera: true,
-    isEasingCamera: false,
-    easeTimer: null,
-    currentZoom: CFG.modes.city.baseZoom,
-    currentPitch: CFG.modes.city.pitch,
+    // Vehicle kinematic state (tracks left-lane shifted routeModel.line)
     displayCoords: [...CFG.defaultCenter],
-    displayLaneCoords: [...CFG.defaultCenter],
     displayHeading: CFG.defaultBearing,
-    lastCamApplied: null,
-
-    // Vehicle kinematic state
     vehicle: {
       coords: [...CFG.defaultCenter],
       heading: CFG.defaultBearing,
@@ -95,21 +92,27 @@
       drAccumulatedMeters: 0,
     },
 
-    // Active Navigation Route (Directions API)
+    // Active Navigation Route, Waypoints & Preference
     routeModel: null,
+    origin: { name: '現在地', coords: [...CFG.defaultCenter] },
+    waypoints: [], // [{ name, coords }]
     destination: null, // { name, coords }
+    routePreference: 'highway', // 'highway' | 'local'
     navProgress: null,
 
-    // Native Mapbox Ego Vehicle Marker & Destination Pin Markers
-    egoMarker: null,
-    egoMarkerEl: null,
-    egoCarInnerEl: null,
+    // WebGL 3D Car Layer & Destination Pin Markers
+    car3d: null,
     destMarker: null,
+    waypointMarkers: [],
     pinModeActive: false,
     pendingPin: null,
     pendingPinMarker: null,
 
-    // Simulation & Debug Controls
+    // Settings, Simulation & Debug Controls
+    settings: {
+      carHeightOffsetM: 0, // -5.0m .. +20.0m fine-tune offset slider
+      lightPreset: 'night', // 'night' | 'dusk' | 'day'
+    },
     sim: {
       demoMode: false,
       demoSpeedKmh: 60,
@@ -126,8 +129,9 @@
       supported: 'wakeLock' in navigator,
     },
 
-    // UI state
+    // Full-Screen Menu UI State
     menuOpen: false,
+    activeMenuTab: 'destination', // 'destination' | 'route' | 'settings'
     lastFrameTs: 0,
     lastSliceUpdateTs: 0,
     toastTimer: null,
@@ -142,7 +146,7 @@
     app: $('cockpit-app'),
     mapContainer: $('map'),
 
-    // Left Edge: OEM Hardware Capacitive Touch Bezel (4 items)
+    // Left Edge: OEM Hardware Capacitive Touch Bezel
     navBezel: $('nav-bezel'),
     bezelClock: $('bezel-clock'),
     btnModeCycle: $('btn-mode-cycle'),
@@ -176,25 +180,51 @@
     initialdDirLabel: $('initiald-dir-label'),
     initialdRankLabel: $('initiald-rank-label'),
 
-    // Slide-Out Menu Drawer (opens beside left bezel)
-    menuDrawer: $('menu-drawer'),
+    // Full-Screen Commercial Automotive Navigation Menu
+    fullscreenMenu: $('fullscreen-menu'),
+    fsMenuRouteBadge: $('fs-menu-route-badge'),
     btnMenuClose: $('btn-menu-close'),
+    menuTabBtns: document.querySelectorAll('.fs-cat-btn'),
+    menuTabPanels: {
+      destination: $('tab-panel-destination'),
+      route: $('tab-panel-route'),
+      settings: $('tab-panel-settings'),
+    },
+
+    // Tab 1: Destination
     searchForm: $('search-form'),
     searchInput: $('search-input'),
     btnMapPinMode: $('btn-map-pin-mode'),
-    btnClearRoute: $('btn-clear-route'),
     searchResultsSection: $('search-results-section'),
     searchResultsList: $('search-results-list'),
     presetList: $('preset-list'),
 
+    // Tab 2: Route Edit
+    btnRoutePrefHighway: $('btn-route-pref-highway'),
+    btnRoutePrefLocal: $('btn-route-pref-local'),
+    btnRouteRecalc: $('btn-route-recalc'),
+    routeEditSummary: $('route-edit-summary'),
+    routeTimelineList: $('route-timeline-list'),
+    waypointSearchForm: $('waypoint-search-form'),
+    waypointSearchInput: $('waypoint-search-input'),
+    waypointResultsList: $('waypoint-results-list'),
+    btnClearRoute: $('btn-clear-route'),
+
+    // Tab 3: Settings & Demo
     toggleDemoMode: $('toggle-demo-mode'),
     sliderDemoSpeed: $('slider-demo-speed'),
     demoSpeedLabel: $('demo-speed-label'),
     speedChipBtns: document.querySelectorAll('.speed-chip-btn'),
     btnDemoReset: $('btn-demo-reset'),
+
+    sliderCarHeight: $('slider-car-height'),
+    carHeightLabel: $('car-height-label'),
+    btnCarHeightReset: $('btn-car-height-reset'),
+
+    lightPresetBtns: document.querySelectorAll('.light-preset-btn'),
     toggleUnderpassSeeThrough: $('toggle-underpass-see-through'),
-    toggleForceCloseZoom: $('toggle-force-close-zoom'),
     toggleTunnelSim: $('toggle-tunnel-sim'),
+    toggleForceCloseZoom: $('toggle-force-close-zoom'),
 
     btnWakelock: $('btn-wakelock'),
     wakelockLabel: $('wakelock-label'),
@@ -203,10 +233,10 @@
 
     dbgZoom: $('dbg-zoom'),
     dbgPitch: $('dbg-pitch'),
+    dbgApproach: $('dbg-approach'),
     dbgElev: $('dbg-elev'),
-    dbgAutoZoom: $('dbg-auto-zoom'),
+    dbgCarZ: $('dbg-car-z'),
     dbgDrMode: $('dbg-dr-mode'),
-    dbgBranch: $('dbg-branch'),
 
     // Pin Confirmation & Toast
     pinConfirmBar: $('pin-confirm-bar'),
@@ -271,13 +301,6 @@
     return map[key] || map.straight;
   }
 
-  /**
-   * Initial-D arcade-style crisp directional curve arrow SVGs (strictly 4 tiers + LEFT/RIGHT):
-   *  - EASY    (20°–45°): gentle sweeping arrow
-   *  - MEDIUM  (45°–80°): curved bend arrow
-   *  - HARD    (80°–130°): sharp corner arrow
-   *  - HAIRPIN (>=130°): tight 180° U-turn arrow
-   */
   function getInitialDCurveSvg(curve) {
     const isRight = curve.direction === 'right';
     const flip = isRight ? '' : 'transform="scale(-1,1) translate(-64,0)"';
@@ -293,12 +316,11 @@
     if (curve.tier === 'MEDIUM') {
       return `<svg ${common}><g ${flip}><path d="M20 54V34c0-11 8-19 20-21l9-1"/><path d="M39 5l11 7-9 10"/></g></svg>`;
     }
-    // EASY (20°-45°)
     return `<svg ${common}><g ${flip}><path d="M24 54V36c0-8 4-15 14-23"/><path d="M27 12l12 0-1 12"/></g></svg>`;
   }
 
   // =========================================================================
-  // Live Clock (Left Hardware Bezel Item 1) & Toast Notifications
+  // Live Clock & Toast Notifications
   // =========================================================================
   function updateLiveClock() {
     const now = new Date();
@@ -441,10 +463,8 @@
       state.map.remove();
       state.map = null;
       state.mapReady = false;
-      state.egoMarker = null;
-      state.egoMarkerEl = null;
-      state.egoCarInnerEl = null;
-      state.lastCamApplied = null;
+      state.car3d = null;
+      state.cam.lastApplied = null;
       state.elevation.dimmedBridgeLayers.clear();
       state.elevation.show3dObjectsApplied = true;
     }
@@ -453,12 +473,8 @@
   }
 
   // =========================================================================
-  // Mapbox GL JS v3 Standard Style Initialization, Left-Lane Routes & Native 3D Marker
+  // Mapbox GL JS v3 Standard Style Initialization, Route Layers & WebGL 3D Car
   // =========================================================================
-
-  /**
-   * 自車位置を常に画面下部1/4へ配置するパディング
-   */
   function getCockpitPadding() {
     const h = (dom.mapContainer && dom.mapContainer.clientHeight) || window.innerHeight;
     return {
@@ -467,29 +483,6 @@
       left: 0,
       right: 0,
     };
-  }
-
-  /**
-   * 道路中央線座標を日本の左側走行車線（進行方向左へ line-offset 相当）へ正確にシフト
-   */
-  function shouldApplyLeftLaneShift() {
-    return Boolean((state.routeModel && state.vehicle.isSnappedToRoute) || !state.gps.hasFix);
-  }
-
-  function computeLeftLaneCoords(centerCoords, headingDeg, zoom) {
-    if (!shouldApplyLeftLaneShift()) {
-      return [centerCoords[0], centerCoords[1]];
-    }
-    const merc =
-      window.mapboxgl && window.mapboxgl.MercatorCoordinate
-        ? mapboxgl.MercatorCoordinate.fromLngLat(centerCoords)
-        : null;
-    return Geo.offsetCoordsToLeftLane(
-      centerCoords,
-      headingDeg,
-      zoom,
-      merc ? merc.meterInMercatorCoordinateUnits() : null
-    );
   }
 
   function initMapbox() {
@@ -506,7 +499,7 @@
       style: CFG.mapStyle, // 'mapbox://styles/mapbox/standard'
       config: {
         basemap: {
-          lightPreset: 'night',
+          lightPreset: state.settings.lightPreset,
           show3dObjects: true,
         },
       },
@@ -522,24 +515,28 @@
 
     state.map = map;
     state.mapReady = false;
-    state.currentZoom = modeCfg.baseZoom;
-    state.currentPitch = modeCfg.pitch;
-    state.lastCamApplied = null;
+    state.cam.center = [...state.displayCoords];
+    state.cam.bearing = state.displayHeading;
+    state.cam.zoom = modeCfg.baseZoom;
+    state.cam.pitch = modeCfg.pitch;
+    state.cam.targetZoom = modeCfg.baseZoom;
+    state.cam.targetPitch = modeCfg.pitch;
+    state.cam.lastApplied = null;
     state.elevation.show3dObjectsApplied = true;
     state.elevation.dimmedBridgeLayers.clear();
 
     map.on('error', (e) => {
       const status = e && e.error && e.error.status;
       if (!state.mapReady && (status === 401 || status === 403)) {
-        showToast('Mapboxアクセストークンが無効です。メニューのAPI KEYから再設定してください。', 'error', 5000);
+        showToast('Mapboxアクセストークンが無効です。設定のAPI KEYから再設定してください。', 'error', 5000);
         openTokenModal(false);
       }
     });
 
     map.on('style.load', () => {
-      // Standard Style 夜間3D設定（独自の fill-extrusion 建物レイヤーは絶対に追加しない）
+      // Standard Style 3D設定（独自の fill-extrusion 建物レイヤーは絶対に追加しない）
       try {
-        map.setConfigProperty('basemap', 'lightPreset', 'night');
+        map.setConfigProperty('basemap', 'lightPreset', state.settings.lightPreset);
         map.setConfigProperty('basemap', 'show3dObjects', true);
         state.elevation.show3dObjectsApplied = true;
       } catch (_err) {}
@@ -547,32 +544,26 @@
         map.setConfigProperty('basemap', 'showHdRoads', true);
       } catch (_err) {}
 
-      // ソース・左車線ルートレイヤー・Mapboxネイティブ3D車両マーカーを style.load 完了後に追加
+      // ソース・ルートレイヤー・WebGL 3D自車カスタムレイヤーを style.load 完了後に追加
       setupTerrainAndRouteSources(map);
       setupRouteLayers(map);
-      state.displayLaneCoords = computeLeftLaneCoords(
-        state.displayCoords,
-        state.displayHeading,
-        state.currentZoom
-      );
-      setupEgoVehicleMarker(map);
+      setupEgo3DCarLayer(map);
 
       state.mapReady = true;
 
-      // 初回パディング・カメラ・地形・高架状態を適用
       const pad = getCockpitPadding();
       map.jumpTo({
-        center: state.displayLaneCoords,
-        bearing: state.displayHeading,
-        zoom: state.currentZoom,
-        pitch: state.currentPitch,
+        center: state.cam.center,
+        bearing: state.cam.bearing,
+        zoom: state.cam.zoom,
+        pitch: state.cam.pitch,
         padding: pad,
       });
       recordCameraSnapshot(
-        state.displayLaneCoords,
-        state.displayHeading,
-        state.currentZoom,
-        state.currentPitch,
+        state.cam.center,
+        state.cam.bearing,
+        state.cam.zoom,
+        state.cam.pitch,
         pad.top
       );
 
@@ -598,7 +589,7 @@
       if (state.map && state.mapReady) {
         const pad = getCockpitPadding();
         state.map.setPadding(pad);
-        state.lastCamApplied = null;
+        state.cam.lastApplied = null;
       }
     });
   }
@@ -629,30 +620,25 @@
   }
 
   /**
-   * 日本の左側走行車線オフセット（line-offset）＋ 半透明スリムルート ＋ 高架上オーバーレイ描画：
-   *  - 'line-offset': ['interpolate', ['linear'], ['zoom'], 14, -2, 18, -6, 20, -12]（進行方向左車線へシフト）
-   *  - 'line-width':  ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18]
-   *  - 'line-opacity': 0.55
-   *  - 通常走行時: slot: 'middle'（路面標示や進行矢印の下に敷く）
-   *  - 高架区間走行時: route-elevated-top (slot: 'top') を動的表示し、3D高架ポリゴン上面に吸着表示
-   *  - 高架下走行時: show3dObjects=false＋透過＋route-xray-underpass で下道左車線を確実に視認可能
+   * turf.lineOffset(-3.5m) で左車線へシフト済みのルート座標を描画する半透明スリムライン
+   *  - slot: 'middle'（路面標示の下に敷く）、line-opacity: 0.55
+   *  - 高架区間走行時: route-elevated-top (slot: 'top') で3D高架ポリゴン上にも確実に表示
+   *  - 高架下走行時: route-xray-underpass で透過表示
    */
   function setupRouteLayers(map) {
+    const laneWidth = ['interpolate', ['linear'], ['zoom'], 14, 4, 18, 10, 20, 18];
+
     if (!map.getLayer('route-traveled-line')) {
       map.addLayer({
         id: 'route-traveled-line',
         type: 'line',
         slot: 'middle',
         source: 'route-traveled',
-        layout: {
-          'line-join': 'round',
-          'line-cap': 'round',
-        },
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-color': '#3b82f6',
           'line-opacity': 0.2,
           'line-width': ['interpolate', ['linear'], ['zoom'], 14, 3, 18, 8, 20, 14],
-          'line-offset': LEFT_LANE_LINE_OFFSET,
           'line-emissive-strength': 1,
           'line-occlusion-opacity': 0.3,
         },
@@ -665,15 +651,11 @@
         type: 'line',
         slot: 'middle',
         source: 'route-remaining',
-        layout: {
-          'line-join': 'round',
-          'line-cap': 'round',
-        },
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-color': '#3b82f6',
           'line-opacity': 0.55,
-          'line-width': LEFT_LANE_LINE_WIDTH,
-          'line-offset': LEFT_LANE_LINE_OFFSET,
+          'line-width': laneWidth,
           'line-emissive-strength': 1,
           'line-occlusion-opacity': 0.45,
         },
@@ -686,22 +668,18 @@
         type: 'line',
         slot: 'middle',
         source: 'route-jct-segment',
-        layout: {
-          'line-join': 'round',
-          'line-cap': 'round',
-        },
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-color': '#60a5fa',
           'line-opacity': 0.45,
-          'line-width': LEFT_LANE_LINE_WIDTH,
-          'line-offset': LEFT_LANE_LINE_OFFSET,
+          'line-width': laneWidth,
           'line-emissive-strength': 1,
           'line-occlusion-opacity': 0.5,
         },
       });
     }
 
-    // 高架区間走行時のみ有効化する slot: 'top' 高架上面オーバーレイレイヤー
+    // 高架区間走行時のみ有効化する slot: 'top' オーバーレイ
     if (!map.getLayer('route-elevated-top')) {
       map.addLayer({
         id: 'route-elevated-top',
@@ -716,8 +694,7 @@
         paint: {
           'line-color': '#3b82f6',
           'line-opacity': 0.55,
-          'line-width': LEFT_LANE_LINE_WIDTH,
-          'line-offset': LEFT_LANE_LINE_OFFSET,
+          'line-width': laneWidth,
           'line-emissive-strength': 1,
           'line-occlusion-opacity': 0.65,
         },
@@ -739,8 +716,7 @@
         paint: {
           'line-color': '#60a5fa',
           'line-opacity': 0.45,
-          'line-width': LEFT_LANE_LINE_WIDTH,
-          'line-offset': LEFT_LANE_LINE_OFFSET,
+          'line-width': laneWidth,
           'line-dasharray': [2, 1.5],
           'line-emissive-strength': 1,
           'line-occlusion-opacity': 0.65,
@@ -767,125 +743,66 @@
   }
 
   /**
-   * Mapboxネイティブ描画（mapboxgl.Marker, pitchAlignment:'map', rotationAlignment:'map'）による
-   * 高精細3Dパース付き自車オブジェクト。Terrain・高架・カメラ傾きに完全同期し浮き・沈みゼロ。
+   * WebGL 3D空間内の立体3D車両（Three.js CustomLayer）を復元配置
+   * 底面（タイヤ接地面）Z=0 厳密補正 + queryTerrainElevation + ユーザー微調整オフセット
    */
-  function setupEgoVehicleMarker(map) {
-    if (state.egoMarker) {
-      state.egoMarker.remove();
-      state.egoMarker = null;
+  function setupEgo3DCarLayer(map) {
+    if (!window.Car3DLayer || !window.THREE) {
+      return;
+    }
+    if (map.getLayer('ego-car-3d-layer')) {
+      try {
+        map.removeLayer('ego-car-3d-layer');
+      } catch (_err) {}
     }
 
-    const el = document.createElement('div');
-    el.className = 'ego-vehicle-marker';
-    el.setAttribute('aria-hidden', 'true');
-    el.innerHTML = `
-      <div class="ego-car-inner">
-        <svg viewBox="0 0 80 136" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <linearGradient id="egoBeam" x1="0" y1="1" x2="0" y2="0">
-              <stop offset="0%" stop-color="#e0f2fe" stop-opacity="0.42"/>
-              <stop offset="100%" stop-color="#60a5fa" stop-opacity="0"/>
-            </linearGradient>
-            <linearGradient id="egoBody" x1="0" y1="0" x2="1" y2="0">
-              <stop offset="0%" stop-color="#94a3b8"/>
-              <stop offset="18%" stop-color="#e2e8f0"/>
-              <stop offset="50%" stop-color="#f8fafc"/>
-              <stop offset="82%" stop-color="#e2e8f0"/>
-              <stop offset="100%" stop-color="#94a3b8"/>
-            </linearGradient>
-            <linearGradient id="egoRoof" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#f8fafc"/>
-              <stop offset="100%" stop-color="#cbd5e1"/>
-            </linearGradient>
-            <linearGradient id="egoGlass" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#1e293b"/>
-              <stop offset="50%" stop-color="#0f172a"/>
-              <stop offset="100%" stop-color="#020617"/>
-            </linearGradient>
-            <radialGradient id="egoShadow" cx="50%" cy="52%" r="50%">
-              <stop offset="55%" stop-color="#000000" stop-opacity="0.62"/>
-              <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
-            </radialGradient>
-          </defs>
+    state.car3d = window.Car3DLayer.createCar3DLayer({
+      id: 'ego-car-3d-layer',
+      initialCoords: state.displayCoords,
+      initialHeading: state.displayHeading,
+      initialHeightOffsetM: state.settings.carHeightOffsetM,
+    });
 
-          <!-- Subtle forward LED headlight beam -->
-          <path d="M21 26 L8 0 L72 0 L59 26 Z" fill="url(#egoBeam)"/>
-
-          <!-- Ground contact shadow -->
-          <ellipse cx="40" cy="76" rx="28" ry="52" fill="url(#egoShadow)"/>
-
-          <!-- Side wing mirrors -->
-          <path d="M16 54 L9 58 L11 63 L18 61 Z" fill="#cbd5e1" stroke="#475569" stroke-width="0.8"/>
-          <path d="M64 54 L71 58 L69 63 L62 61 Z" fill="#cbd5e1" stroke="#475569" stroke-width="0.8"/>
-
-          <!-- Sculpted lower chassis & outer body shell -->
-          <path d="M22 24 C28 18 52 18 58 24 C63 29 65 40 65 56 L65 104 C65 117 61 124 55 126 L25 126 C19 124 15 117 15 104 L15 56 C15 40 17 29 22 24 Z" fill="url(#egoBody)" stroke="#64748b" stroke-width="1.2"/>
-
-          <!-- Sculpted hood aerodynamic lines -->
-          <path d="M26 27 L29 48 M54 27 L51 48" stroke="#94a3b8" stroke-width="1" stroke-opacity="0.65" stroke-linecap="round"/>
-
-          <!-- Panoramic tinted cabin (windshield + side windows + fastback rear glass) -->
-          <path d="M23 50 C28 45 52 45 57 50 L59 95 C56 105 51 110 40 110 C29 110 24 105 21 95 Z" fill="url(#egoGlass)" stroke="#334155" stroke-width="1"/>
-
-          <!-- Windshield specular reflection -->
-          <path d="M27 52 C33 48.5 47 48.5 53 52 L51 58 C45 55.5 35 55.5 29 58 Z" fill="#93c5fd" fill-opacity="0.22"/>
-
-          <!-- Elevated 3D roof panel -->
-          <rect x="25" y="62" width="30" height="31" rx="8" fill="url(#egoRoof)" stroke="#94a3b8" stroke-width="0.9"/>
-
-          <!-- Dual LED Headlights -->
-          <path d="M19 29 C22 24 27 23 31 24 L29 29 Z" fill="#f8fafc"/>
-          <path d="M61 29 C58 24 53 23 49 24 L51 29 Z" fill="#f8fafc"/>
-
-          <!-- Full-width signature LED Tail-light Bar (turns amber in Dead Reckoning) -->
-          <rect class="ego-taillight" x="19" y="120" width="42" height="4.2" rx="2.1"/>
-        </svg>
-      </div>
-    `;
-
-    state.egoMarkerEl = el;
-    state.egoCarInnerEl = el.querySelector('.ego-car-inner');
-    state.egoMarker = new mapboxgl.Marker({
-      element: el,
-      pitchAlignment: 'map',
-      rotationAlignment: 'map',
-      anchor: 'center',
-    })
-      .setLngLat(state.displayLaneCoords)
-      .setRotation(state.displayHeading)
-      .addTo(map);
+    try {
+      map.addLayer(state.car3d.layer);
+    } catch (_err) {
+      state.car3d = null;
+    }
   }
 
-  function syncEgoMarkerScaleAndClasses(zoom) {
-    if (!state.egoMarkerEl || !state.egoCarInnerEl) return;
-    const z = Number.isFinite(zoom) ? zoom : state.currentZoom;
-    const scale = Geo.clamp(0.62 + (z - 16.5) * 0.11, 0.56, 1.08);
-    state.egoCarInnerEl.style.transform = `scale(${scale.toFixed(3)})`;
-    state.egoMarkerEl.classList.toggle('is-dr', state.gps.isDeadReckoning);
-    state.egoMarkerEl.classList.toggle('is-underpass', state.elevation.state === 'underpass');
-    state.egoMarkerEl.classList.toggle('is-elevated', state.elevation.state === 'elevated');
-  }
-
-  function updateDestinationMarker(coords) {
+  function updateDestinationAndWaypointMarkers() {
     if (!state.map) return;
+
     if (state.destMarker) {
       state.destMarker.remove();
       state.destMarker = null;
     }
-    if (!coords) return;
+    state.waypointMarkers.forEach((m) => m.remove());
+    state.waypointMarkers = [];
 
-    const el = document.createElement('div');
-    el.className = 'dest-pin-marker';
-    el.innerHTML = '<div class="dest-pin-ring"><div class="dest-pin-core"></div></div>';
+    state.waypoints.forEach((wp) => {
+      const el = document.createElement('div');
+      el.className = 'dest-pin-marker';
+      el.innerHTML =
+        '<div class="dest-pin-ring" style="background:#d97706;"><div class="dest-pin-core"></div></div>';
+      const marker = new mapboxgl.Marker({ element: el, anchor: 'center' })
+        .setLngLat(wp.coords)
+        .addTo(state.map);
+      state.waypointMarkers.push(marker);
+    });
 
-    state.destMarker = new mapboxgl.Marker({ element: el, anchor: 'center' })
-      .setLngLat(coords)
-      .addTo(state.map);
+    if (state.destination && state.destination.coords) {
+      const el = document.createElement('div');
+      el.className = 'dest-pin-marker';
+      el.innerHTML = '<div class="dest-pin-ring"><div class="dest-pin-core"></div></div>';
+      state.destMarker = new mapboxgl.Marker({ element: el, anchor: 'center' })
+        .setLngLat(state.destination.coords)
+        .addTo(state.map);
+    }
   }
 
   // =========================================================================
-  // Per-Frame Ground / Bridge Hit-Test (`queryRenderedFeatures`) & Overlays
+  // Per-Frame Ground / Bridge Hit-Test & Overpass/Underpass Visuals
   // =========================================================================
   function queryRenderedRoadFeaturesAtEgo(map, lngLat) {
     if (!map || !state.mapReady || !Array.isArray(lngLat)) return [];
@@ -914,6 +831,7 @@
       'route-elevated-top',
       'route-xray-underpass',
       'jct-focus-ring',
+      'ego-car-3d-layer',
     ]);
 
     if (!dimmed) {
@@ -981,10 +899,8 @@
       return;
     }
 
-    // 1. Scan and dim classic/custom bridge layers (0.22 opacity) when underpass, or restore
     setStyleBridgeLayersOpacity(map, isUnderpass);
 
-    // 2. Mapbox Standard Style basemap: disable 3D overpass objects while driving underneath
     const desiredShow3d = !isUnderpass;
     if (state.elevation.show3dObjectsApplied !== desiredShow3d) {
       try {
@@ -993,28 +909,25 @@
       } catch (_e) {}
     }
 
-    // 3. Elevated Overpass Snapping: enable slot:'top' overlay while driving ON elevated bridges/highways
     if (map.getLayer('route-elevated-top')) {
       try {
         map.setLayoutProperty('route-elevated-top', 'visibility', isElevated ? 'visible' : 'none');
       } catch (_e) {}
     }
 
-    // 4. Underpass X-Ray occlusion overlay for lower surface road visibility
     if (map.getLayer('route-xray-underpass')) {
       try {
         map.setLayoutProperty('route-xray-underpass', 'visibility', isUnderpass ? 'visible' : 'none');
       } catch (_e) {}
     }
 
-    syncEgoMarkerScaleAndClasses(map.getZoom());
+    if (state.car3d) {
+      state.car3d.updatePose({ underpassSeeThrough: isUnderpass });
+    }
+
     updateElevationBadgeUi();
   }
 
-  /**
-   * 毎フレーム自車座標 (map.project(lngLat)) に対して map.queryRenderedFeatures(point) を実行し、
-   * 直下フィーチャーの structure === 'bridge' / class === 'motorway' とルート属性から高架判定を行う。
-   */
   function evaluateElevationAndSeeThrough(_nowTs, forceImmediate = false) {
     const activeStep = state.routeModel
       ? Geo.getActiveRouteStep(state.routeModel, state.vehicle.routeDistKm)
@@ -1023,7 +936,7 @@
     const renderedFeatures =
       state.sim.forceUnderpassSeeThrough || !state.mapReady
         ? []
-        : queryRenderedRoadFeaturesAtEgo(state.map, state.displayLaneCoords);
+        : queryRenderedRoadFeaturesAtEgo(state.map, state.displayCoords);
 
     const res = Geo.classifyElevationState({
       modeId: state.mode,
@@ -1067,8 +980,39 @@
         ? '高架下シースルー透過 ON（頭上高架半透明＋X-Ray有効）'
         : '高架下シースルー透過 OFF（自動判定へ復帰）',
       state.sim.forceUnderpassSeeThrough ? 'warn' : 'info',
-      2600
+      2400
     );
+  }
+
+  function setLightPreset(preset) {
+    const allowed = new Set(['night', 'dusk', 'day']);
+    if (!allowed.has(preset)) return;
+    state.settings.lightPreset = preset;
+
+    dom.lightPresetBtns.forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.lightPreset === preset);
+    });
+
+    if (state.map && state.mapReady) {
+      try {
+        state.map.setConfigProperty('basemap', 'lightPreset', preset);
+      } catch (_err) {}
+    }
+
+    const labelMap = { night: 'Night（夜間）', dusk: 'Dusk（夕暮れ）', day: 'Day（昼間）' };
+    showToast(`ライトプリセット：${labelMap[preset]}`, 'info', 1800);
+  }
+
+  function setCarHeightOffset(meters) {
+    const val = Geo.clamp(Math.round((Number(meters) || 0) * 2) / 2, -5, 20);
+    state.settings.carHeightOffsetM = val;
+    dom.sliderCarHeight.value = String(val);
+    const sign = val > 0 ? '+' : '';
+    dom.carHeightLabel.textContent = `${sign}${val.toFixed(1)} m`;
+
+    if (state.car3d) {
+      state.car3d.updatePose({ heightOffsetM: val });
+    }
   }
 
   // =========================================================================
@@ -1103,14 +1047,11 @@
     }
 
     const mc = state.mountainCurve;
-
-    // 1. Throttle evaluation to every 500ms (0.5 sec)
     if (!forceEval && nowTs - mc.lastEvalTs < mc.evalIntervalMs) {
       return;
     }
     mc.lastEvalTs = nowTs;
 
-    // 2. Display lock: hold displayed curve icon for at least 2.5 seconds (2500ms)
     if (!forceEval && mc.displayed && nowTs < mc.lockedUntilTs) {
       return;
     }
@@ -1132,7 +1073,7 @@
   }
 
   // =========================================================================
-  // 3-Mode Switching, Terrain & Per-Frame Proximity Auto-3D Zoom Camera
+  // 3-Mode Switching, Terrain & Continuous Smoothstep + 0.08 Damping Camera
   // =========================================================================
   function applyTerrainForMode(modeId) {
     const map = state.map;
@@ -1159,39 +1100,17 @@
   function cycleDrivingMode() {
     const idx = MODE_ORDER.indexOf(state.mode);
     const nextMode = MODE_ORDER[(idx + 1) % MODE_ORDER.length];
-    setDrivingMode(nextMode, true);
+    setDrivingMode(nextMode);
   }
 
-  function setDrivingMode(modeId, animateCamera = true) {
+  function setDrivingMode(modeId) {
     if (!CFG.modes[modeId]) return;
     state.mode = modeId;
 
-    state.autoCloseZoomActive = false;
-    state.isCloseZoomActive = state.sim.forceCloseZoom;
-    if (!state.isCloseZoomActive) {
-      updateJctBeaconOnMap(null);
-    }
-
     updateModeButtonsUi(modeId);
     applyTerrainForMode(modeId);
-
-    const targetZoom = Geo.computeSpeedAdaptiveZoom(
-      modeId,
-      state.vehicle.speedMps * 3.6,
-      state.isCloseZoomActive
-    );
-    const targetPitch = Geo.computeTargetPitch(modeId, state.isCloseZoomActive);
-
-    if (animateCamera && state.followCamera && state.map && state.mapReady) {
-      triggerSmoothCameraEase(targetZoom, targetPitch, 900);
-    } else {
-      state.currentZoom = targetZoom;
-      state.currentPitch = targetPitch;
-      state.lastCamApplied = null;
-    }
-
+    evaluateContinuousCameraTarget();
     evaluateElevationAndSeeThrough(performance.now(), true);
-    evaluateCloseZoomEveryFrame(false);
     resetMountainCurveDisplay();
     evaluateMountainCurveThrottled(performance.now(), true);
     updateNavigationAnalytics();
@@ -1199,7 +1118,7 @@
   }
 
   function recordCameraSnapshot(coords, bearing, zoom, pitch, padTop) {
-    state.lastCamApplied = {
+    state.cam.lastApplied = {
       lng: coords[0],
       lat: coords[1],
       bearing,
@@ -1210,147 +1129,65 @@
   }
 
   function cameraHasChanged(coords, bearing, zoom, pitch, padTop) {
-    const prev = state.lastCamApplied;
+    const prev = state.cam.lastApplied;
     if (!prev) return true;
     return (
       Math.abs(coords[0] - prev.lng) > 1e-7 ||
       Math.abs(coords[1] - prev.lat) > 1e-7 ||
-      Math.abs(Geo.angleDiff(prev.bearing, bearing)) > 0.08 ||
-      Math.abs(zoom - prev.zoom) > 0.004 ||
-      Math.abs(pitch - prev.pitch) > 0.05 ||
+      Math.abs(Geo.angleDiff(prev.bearing, bearing)) > 0.05 ||
+      Math.abs(zoom - prev.zoom) > 0.002 ||
+      Math.abs(pitch - prev.pitch) > 0.03 ||
       padTop !== prev.padTop
     );
   }
 
-  function triggerSmoothCameraEase(targetZoom, targetPitch, durationMs = 900) {
-    if (!state.map || !state.mapReady) return;
-    state.isEasingCamera = true;
-    state.currentZoom = targetZoom;
-    state.currentPitch = targetPitch;
-
-    let targetCenter = [...state.vehicle.coords];
-    let targetBearing = state.vehicle.heading;
-    const isMoving =
-      (state.sim.demoMode || state.gps.isDeadReckoning) && state.vehicle.speedMps > 1;
-    if (isMoving && state.routeModel && state.vehicle.isSnappedToRoute) {
-      const lookaheadKm = (state.vehicle.speedMps * (durationMs / 1000)) / 1000;
-      const predDistKm = Geo.clamp(
-        state.vehicle.routeDistKm + lookaheadKm,
-        0,
-        state.routeModel.totalKm
-      );
-      const predPt = turf.along(state.routeModel.line, predDistKm, { units: 'kilometers' });
-      targetCenter = predPt.geometry.coordinates;
-      targetBearing = Geo.getRouteHeadingAt(state.routeModel, predDistKm, 0.025);
-    }
-
-    const pad = getCockpitPadding();
-    const laneTargetCenter = computeLeftLaneCoords(targetCenter, targetBearing, targetZoom);
-    clearTimeout(state.easeTimer);
-    state.map.easeTo({
-      center: laneTargetCenter,
-      bearing: targetBearing,
-      zoom: targetZoom,
-      pitch: targetPitch,
-      padding: pad,
-      duration: durationMs,
-      easing: (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2),
-      essential: true,
-    });
-    recordCameraSnapshot(laneTargetCenter, targetBearing, targetZoom, targetPitch, pad.top);
-
-    state.easeTimer = setTimeout(() => {
-      state.isEasingCamera = false;
-    }, durationMs + 50);
-  }
-
   /**
-   * 毎フレーム turf.distance で routes[0].legs[0].steps の各 maneuver.location との距離を計算し、
-   * 閾値（市街地 150m / 高速 800m）以下で至近距離 3D カメラ（easeTo）を発火させる。
+   * 毎フレーム残距離から Smoothstep 目標 zoom / pitch を連続算出（段差・閾値ジャンプなし）
    */
-  function evaluateCloseZoomEveryFrame(notify = true) {
+  function evaluateContinuousCameraTarget() {
     const modeCfg = CFG.modes[state.mode];
-    const evalResult = Geo.evaluateManeuverProximityZoom(
+    const evalRes = Geo.evaluateManeuverProximityZoom(
       state.routeModel,
       state.vehicle.coords,
       state.vehicle.routeDistKm,
       state.mode,
-      state.autoCloseZoomActive,
+      state.sim.forceCloseZoom,
       modeCfg,
       state.vehicle.isSnappedToRoute
     );
 
-    state.autoCloseZoomActive = evalResult.active;
-    state.closeZoomStep = evalResult.step;
-    state.lastManeuverDirectDistM = evalResult.directDistMeters;
+    const prevApproaching = state.cam.isApproaching;
+    const prevStepIdx = state.cam.approachStep ? state.cam.approachStep.index : -1;
+    const nextStepIdx = evalRes.step ? evalRes.step.index : -1;
 
-    const effectiveActive = state.sim.forceCloseZoom || state.autoCloseZoomActive;
+    state.cam.targetZoom = evalRes.targetZoom;
+    state.cam.targetPitch = evalRes.targetPitch;
+    state.cam.approachT = evalRes.approachT;
+    state.cam.easedT = evalRes.easedT;
+    state.cam.isApproaching = evalRes.active;
+    state.cam.approachStep = evalRes.step;
+    state.cam.lastManeuverDistM = evalRes.effectiveDistMeters;
 
-    if (effectiveActive !== state.isCloseZoomActive) {
-      state.isCloseZoomActive = effectiveActive;
-      updateJctBeaconOnMap(effectiveActive ? evalResult.step : null);
-
-      const speedKmh = state.vehicle.speedMps * 3.6;
-      const targetZoom = Geo.computeSpeedAdaptiveZoom(state.mode, speedKmh, effectiveActive);
-      const targetPitch = Geo.computeTargetPitch(state.mode, effectiveActive);
-
-      if (state.followCamera && state.map && state.mapReady) {
-        triggerSmoothCameraEase(targetZoom, targetPitch, 900);
-      } else {
-        state.currentZoom = targetZoom;
-        state.currentPitch = targetPitch;
-        state.lastCamApplied = null;
-      }
-
+    if (prevApproaching !== evalRes.active || prevStepIdx !== nextStepIdx) {
+      updateJctBeaconOnMap(evalRes.active ? evalRes.step : null);
       refreshGuidanceUi();
-
-      if (notify && !state.sim.forceCloseZoom) {
-        if (effectiveActive) {
-          const label = state.mode === 'highway' ? 'JCT・分岐' : '交差点';
-          showToast(
-            `${label} ${Geo.formatDistanceJa(evalResult.directDistMeters)}手前 — 至近距離3Dズーム`,
-            'info',
-            2400
-          );
-        } else {
-          showToast('通過完了 — 巡航視点へ復帰', 'info', 2000);
-        }
-      }
     }
   }
 
   function setForceCloseZoom(enabled) {
     state.sim.forceCloseZoom = Boolean(enabled);
     dom.toggleForceCloseZoom.checked = state.sim.forceCloseZoom;
-
     if (state.sim.forceCloseZoom && !state.followCamera) {
-      state.followCamera = true;
-      dom.btnRecenter.classList.add('is-lit');
-      dom.btnRecenter.classList.remove('attention');
+      setFollowCamera(true);
     }
-
-    const effectiveActive = state.sim.forceCloseZoom || state.autoCloseZoomActive;
-    state.isCloseZoomActive = effectiveActive;
-    updateJctBeaconOnMap(effectiveActive ? state.closeZoomStep : null);
-
-    const speedKmh = state.vehicle.speedMps * 3.6;
-    const targetZoom = Geo.computeSpeedAdaptiveZoom(state.mode, speedKmh, effectiveActive);
-    const targetPitch = Geo.computeTargetPitch(state.mode, effectiveActive);
-
-    if (state.map && state.mapReady) {
-      triggerSmoothCameraEase(targetZoom, targetPitch, 850);
-    } else {
-      state.currentZoom = targetZoom;
-      state.currentPitch = targetPitch;
-    }
-
+    evaluateContinuousCameraTarget();
     refreshGuidanceUi();
     showToast(
       state.sim.forceCloseZoom
-        ? `強制3Dズーム ON（Zoom ${targetZoom} / Pitch ${targetPitch}°）`
-        : `強制3Dズーム OFF（Zoom ${targetZoom} / Pitch ${targetPitch}°）`,
+        ? `強制3Dズーム ON（目標 Zoom ${state.cam.targetZoom.toFixed(1)} / Pitch ${Math.round(state.cam.targetPitch)}°）`
+        : '強制3Dズーム OFF（距離連動補間へ復帰）',
       'info',
-      2400
+      2200
     );
   }
 
@@ -1410,31 +1247,28 @@
     state.followCamera = enabled;
     dom.btnRecenter.classList.toggle('is-lit', enabled);
     dom.btnRecenter.classList.toggle('attention', !enabled);
+
     if (enabled && state.map && state.mapReady) {
-      const targetZoom = Geo.computeSpeedAdaptiveZoom(
-        state.mode,
-        state.vehicle.speedMps * 3.6,
-        state.isCloseZoomActive
-      );
-      const targetPitch = Geo.computeTargetPitch(state.mode, state.isCloseZoomActive);
-      triggerSmoothCameraEase(targetZoom, targetPitch, 750);
+      // Seed damped camera state from current viewport so recentering glides seamlessly via 0.08 damping
+      const curCenter = state.map.getCenter();
+      state.cam.center = [curCenter.lng, curCenter.lat];
+      state.cam.bearing = Geo.normalizeBearing(state.map.getBearing());
+      state.cam.zoom = state.map.getZoom();
+      state.cam.pitch = state.map.getPitch();
+      state.cam.lastApplied = null;
     }
   }
 
   // =========================================================================
-  // Destination Search (Mapbox Geocoding API) & Map Click / Long-Press
+  // Geocoding Search (Destination & Waypoint Add) + Map Tap Gestures
   // =========================================================================
-  async function searchPlaces(query) {
+  async function geocodePlaces(query) {
     const q = query.trim();
-    if (!q || !state.accessToken) return;
-
-    dom.searchResultsSection.classList.remove('hidden');
-    dom.searchResultsList.innerHTML = '<div class="map-hint-note">検索中...</div>';
+    if (!q || !state.accessToken) return [];
 
     const [lng, lat] = state.vehicle.coords;
     let items = [];
 
-    // Primary: Mapbox Geocoding API v5
     try {
       const v5Url =
         `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json` +
@@ -1453,7 +1287,6 @@
       }
     } catch (_err) {}
 
-    // Fallback: Mapbox Geocoding API v6
     if (items.length === 0) {
       try {
         const v6Url =
@@ -1475,10 +1308,18 @@
       } catch (_err) {}
     }
 
-    const valid = items.filter((it) => Array.isArray(it.coords) && it.coords.length >= 2);
+    return items.filter((it) => Array.isArray(it.coords) && it.coords.length >= 2);
+  }
+
+  async function searchDestinationPlaces(query) {
+    if (!query.trim()) return;
+    dom.searchResultsSection.classList.remove('hidden');
+    dom.searchResultsList.innerHTML = '<div class="map-hint-note">検索中...</div>';
+
+    const valid = await geocodePlaces(query);
     if (valid.length === 0) {
       dom.searchResultsList.innerHTML =
-        '<div class="map-hint-note">候補が見つかりませんでした。別キーワードまたはマップタップでお試しください。</div>';
+        '<div class="map-hint-note">候補が見つかりませんでした。別キーワードまたは「地図から選ぶ」をお試しください。</div>';
       return;
     }
 
@@ -1494,9 +1335,48 @@
       btn.querySelector('.search-result-name').textContent = place.name;
       btn.querySelector('.search-result-addr').textContent = place.address || '日本';
       btn.addEventListener('click', () => {
+        state.waypoints = [];
         setDestinationAndFetchRoute(place.coords, place.name);
       });
       dom.searchResultsList.appendChild(btn);
+    });
+  }
+
+  async function searchWaypointPlaces(query) {
+    if (!query.trim()) return;
+    if (!state.destination) {
+      showToast('先に「目的地」を設定してください', 'warn');
+      return;
+    }
+    dom.waypointResultsList.classList.remove('hidden');
+    dom.waypointResultsList.innerHTML = '<div class="map-hint-note">経由地を検索中...</div>';
+
+    const valid = await geocodePlaces(query);
+    if (valid.length === 0) {
+      dom.waypointResultsList.innerHTML =
+        '<div class="map-hint-note">経由地の候補が見つかりませんでした。</div>';
+      return;
+    }
+
+    dom.waypointResultsList.innerHTML = '';
+    valid.forEach((place) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'search-result-item';
+      btn.innerHTML = `
+        <div class="search-result-name"></div>
+        <div class="search-result-addr"></div>
+      `;
+      btn.querySelector('.search-result-name').textContent = `+ 経由地に追加：${place.name}`;
+      btn.querySelector('.search-result-addr').textContent = place.address || '日本';
+      btn.addEventListener('click', async () => {
+        state.waypoints.push({ name: place.name, coords: place.coords });
+        dom.waypointSearchInput.value = '';
+        dom.waypointResultsList.classList.add('hidden');
+        dom.waypointResultsList.innerHTML = '';
+        await recalculateActiveRoute(false);
+      });
+      dom.waypointResultsList.appendChild(btn);
     });
   }
 
@@ -1546,6 +1426,7 @@
         showToast('長押し地点を目的地に設定しています...');
         const placeName = await reverseGeocode(coords);
         clearPendingPin();
+        state.waypoints = [];
         await setDestinationAndFetchRoute(coords, placeName);
       }, 450);
     };
@@ -1632,14 +1513,17 @@
   }
 
   // =========================================================================
-  // Mapbox Directions API (`mapbox/driving`) Route Fetch & Rendering
+  // Mapbox Directions API (`mapbox/driving`) w/ Waypoints & Preference + turf.lineOffset(-3.5m)
   // =========================================================================
-  async function fetchDirectionsRoute(originCoords, destCoords) {
-    const coordStr = `${originCoords[0].toFixed(6)},${originCoords[1].toFixed(6)};${destCoords[0].toFixed(6)},${destCoords[1].toFixed(6)}`;
+  async function fetchDirectionsRoute(points, preference = 'highway') {
+    const coordStr = points
+      .map((c) => `${c[0].toFixed(6)},${c[1].toFixed(6)}`)
+      .join(';');
+    const excludeParam = preference === 'local' ? '&exclude=motorway,toll' : '';
     const url =
       `https://api.mapbox.com/directions/v5/mapbox/driving/${coordStr}` +
       `?steps=true&geometries=geojson&overview=full&annotations=distance,speed&language=ja` +
-      `&access_token=${encodeURIComponent(state.accessToken)}`;
+      `${excludeParam}&access_token=${encodeURIComponent(state.accessToken)}`;
 
     const res = await fetch(url);
     if (!res.ok) {
@@ -1652,21 +1536,51 @@
     return data.routes[0];
   }
 
-  async function setDestinationAndFetchRoute(destCoords, destName, customOrigin = null) {
+  async function setDestinationAndFetchRoute(
+    destCoords,
+    destName,
+    customOrigin = null,
+    originName = '現在地',
+    closeMenuOnSuccess = true
+  ) {
     if (!state.accessToken) {
       openTokenModal(true);
       return;
     }
 
-    const origin = customOrigin || state.vehicle.coords;
-    showToast(`ルートを検索中: ${destName}`);
+    const originCoords = customOrigin ? [...customOrigin] : [...state.vehicle.coords];
+    state.origin = { name: originName, coords: originCoords };
+    state.destination = { name: destName, coords: [...destCoords] };
+
+    await recalculateActiveRoute(closeMenuOnSuccess);
+  }
+
+  async function recalculateActiveRoute(closeMenuOnSuccess = true) {
+    if (!state.destination) {
+      showToast('先に目的地を設定してください', 'warn');
+      return;
+    }
+    if (!state.accessToken) {
+      openTokenModal(true);
+      return;
+    }
+
+    const points = [
+      state.origin.coords,
+      ...state.waypoints.map((w) => w.coords),
+      state.destination.coords,
+    ];
+    const prefLabel = state.routePreference === 'local' ? '一般道優先' : '高速優先';
+    showToast(`ルートを検索中 (${prefLabel}): ${state.destination.name}`);
 
     try {
-      const route = await fetchDirectionsRoute(origin, destCoords);
-      const model = Geo.buildRouteModel(route);
+      const route = await fetchDirectionsRoute(points, state.routePreference);
+      // turf.lineOffset(-3.5m) でルート座標自体を左側走行車線へシフトしてモデル生成
+      const model = Geo.buildRouteModel(route, {
+        leftLaneOffsetMeters: CFG.leftLaneOffsetMeters,
+      });
 
       state.routeModel = model;
-      state.destination = { name: destName, coords: destCoords };
       state.vehicle.coords = [...model.coords[0]];
       state.vehicle.routeDistKm = 0;
       state.vehicle.isSnappedToRoute = true;
@@ -1674,22 +1588,25 @@
       state.gps.lastValidHeading = state.vehicle.heading;
       state.displayCoords = [...state.vehicle.coords];
       state.displayHeading = state.vehicle.heading;
-      state.autoCloseZoomActive = false;
-      state.isCloseZoomActive = state.sim.forceCloseZoom;
-      state.lastCamApplied = null;
+      state.cam.center = [...state.displayCoords];
+      state.cam.bearing = state.displayHeading;
+      state.cam.lastApplied = null;
       resetMountainCurveDisplay();
 
-      updateDestinationMarker(destCoords);
+      updateDestinationAndWaypointMarkers();
       syncRouteSourcesToMap();
       setPinMode(false);
       clearPendingPin();
-      setMenuDrawerOpen(false);
+      if (closeMenuOnSuccess) {
+        setMenuOpen(false);
+      }
       dom.btnClearRoute.classList.remove('hidden');
 
       updateNavigationAnalytics();
+      evaluateContinuousCameraTarget();
       evaluateElevationAndSeeThrough(performance.now(), true);
-      evaluateCloseZoomEveryFrame(false);
       evaluateMountainCurveThrottled(performance.now(), true);
+      renderRouteTimeline();
       setFollowCamera(true);
 
       showToast(
@@ -1705,13 +1622,15 @@
   function clearActiveRoute() {
     state.routeModel = null;
     state.destination = null;
+    state.waypoints = [];
     state.navProgress = null;
     state.vehicle.routeDistKm = 0;
     state.vehicle.isSnappedToRoute = false;
-    state.autoCloseZoomActive = false;
-    state.isCloseZoomActive = state.sim.forceCloseZoom;
-    state.closeZoomStep = null;
-    state.lastManeuverDirectDistM = Infinity;
+    state.cam.isApproaching = false;
+    state.cam.approachStep = null;
+    state.cam.approachT = 0;
+    state.cam.easedT = 0;
+    state.cam.lastManeuverDistM = Infinity;
     resetMountainCurveDisplay();
 
     if (state.sim.demoMode) {
@@ -1720,10 +1639,12 @@
       dom.demoActiveChip.classList.add('hidden');
     }
 
-    updateDestinationMarker(null);
+    updateDestinationAndWaypointMarkers();
     updateJctBeaconOnMap(null);
     syncRouteSourcesToMap();
+    evaluateContinuousCameraTarget();
     evaluateElevationAndSeeThrough(performance.now(), true);
+    renderRouteTimeline();
     setFollowCamera(true);
     refreshGuidanceUi();
     dom.btnClearRoute.classList.add('hidden');
@@ -1755,12 +1676,19 @@
       openTokenModal(true);
       return;
     }
-    setDrivingMode(preset.mode, false);
+    state.waypoints = [];
+    setDrivingMode(preset.mode);
     state.sim.demoSpeedKmh = preset.defaultSpeedKmh;
     dom.sliderDemoSpeed.value = String(preset.defaultSpeedKmh);
     dom.demoSpeedLabel.textContent = `${preset.defaultSpeedKmh} km/h`;
 
-    await setDestinationAndFetchRoute(preset.destination, preset.name, preset.origin);
+    await setDestinationAndFetchRoute(
+      preset.destination,
+      preset.name,
+      preset.origin,
+      `${preset.badge}スタート地点`,
+      true
+    );
 
     if (autoStartDemo && state.routeModel) {
       state.sim.demoMode = true;
@@ -1770,8 +1698,78 @@
       state.gps.lastValidSpeedMps = state.vehicle.speedMps;
       setFollowCamera(true);
       updateGpsStatusUi();
-      showToast(`${preset.badge}デモ走行を開始 (${preset.defaultSpeedKmh} km/h)`);
+      showToast(`${preset.name} デモ走行を開始 (${preset.defaultSpeedKmh} km/h)`);
     }
+  }
+
+  function renderRouteTimeline() {
+    dom.routeTimelineList.innerHTML = '';
+
+    if (!state.destination || !state.routeModel) {
+      dom.fsMenuRouteBadge.textContent = 'ルート未設定';
+      dom.routeEditSummary.textContent = 'ルート未設定';
+      dom.btnClearRoute.classList.add('hidden');
+      dom.routeTimelineList.innerHTML =
+        '<div class="map-hint-note">現在ルートが設定されていません。「目的地」タブから検索またはクイック目的地を選択してください。</div>';
+      return;
+    }
+
+    const distStr = Geo.formatDistanceJa(state.routeModel.totalMeters);
+    const durStr = Geo.formatDurationJa(state.routeModel.totalDurationSec);
+    const prefTag = state.routePreference === 'local' ? '一般道優先' : '高速優先';
+    dom.fsMenuRouteBadge.textContent = `${state.destination.name} · ${distStr}`;
+    dom.routeEditSummary.textContent = `${distStr} / 約${durStr}（${prefTag}）`;
+    dom.btnClearRoute.classList.remove('hidden');
+
+    // Origin Row
+    const originRow = document.createElement('div');
+    originRow.className = 'route-stop-row';
+    originRow.innerHTML = `
+      <span class="stop-dot origin"></span>
+      <div class="stop-info">
+        <div class="stop-role">出発地 (Origin)</div>
+        <div class="stop-name"></div>
+      </div>
+    `;
+    originRow.querySelector('.stop-name').textContent = state.origin.name || '現在地';
+    dom.routeTimelineList.appendChild(originRow);
+
+    // Waypoints Rows
+    state.waypoints.forEach((wp, idx) => {
+      const wpRow = document.createElement('div');
+      wpRow.className = 'route-stop-row';
+      wpRow.innerHTML = `
+        <span class="stop-dot waypoint"></span>
+        <div class="stop-info">
+          <div class="stop-role">経由地 ${idx + 1} (Waypoint)</div>
+          <div class="stop-name"></div>
+        </div>
+        <button type="button" class="icon-btn btn-danger" aria-label="経由地を削除">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      `;
+      wpRow.querySelector('.stop-name').textContent = wp.name;
+      wpRow.querySelector('button').addEventListener('click', async () => {
+        state.waypoints.splice(idx, 1);
+        await recalculateActiveRoute(false);
+      });
+      dom.routeTimelineList.appendChild(wpRow);
+    });
+
+    // Destination Row
+    const destRow = document.createElement('div');
+    destRow.className = 'route-stop-row';
+    destRow.innerHTML = `
+      <span class="stop-dot dest"></span>
+      <div class="stop-info">
+        <div class="stop-role">目的地 (Destination)</div>
+        <div class="stop-name"></div>
+      </div>
+    `;
+    destRow.querySelector('.stop-name').textContent = state.destination.name;
+    dom.routeTimelineList.appendChild(destRow);
   }
 
   // =========================================================================
@@ -1874,13 +1872,15 @@
     if (wasFirstFix) {
       state.displayCoords = [...state.vehicle.coords];
       state.displayHeading = state.vehicle.heading;
-      state.lastCamApplied = null;
+      state.cam.center = [...state.displayCoords];
+      state.cam.bearing = state.displayHeading;
+      state.cam.lastApplied = null;
     }
 
     state.gps.lastValidHeading = state.vehicle.heading;
 
     if (finalSpeedMps * 3.6 >= 10 && state.menuOpen) {
-      setMenuDrawerOpen(false);
+      setMenuOpen(false);
     }
 
     updateNavigationAnalytics();
@@ -1912,6 +1912,10 @@
     state.sim.lockedTunnelSpeedMps = activeSpeedMps;
     state.vehicle.speedMps = activeSpeedMps;
 
+    if (state.car3d) {
+      state.car3d.updatePose({ isDeadReckoning: true });
+    }
+
     updateGpsStatusUi();
     showToast(`自律航法（Dead Reckoning）へ切替：${reason}`, 'warn', 3000);
   }
@@ -1921,6 +1925,9 @@
     state.gps.isDeadReckoning = false;
     state.gps.drMode = 'OFF';
     state.sim.lockedTunnelSpeedMps = null;
+    if (state.car3d) {
+      state.car3d.updatePose({ isDeadReckoning: false });
+    }
     updateGpsStatusUi();
   }
 
@@ -1942,14 +1949,14 @@
   }, 250);
 
   // =========================================================================
-  // Core 60fps Kinematic, 3D Car Pose, Elevation & Camera Loop
+  // Core 60fps Kinematic, WebGL 3D Car Pose & Smoothstep+Damping Camera Loop
   // =========================================================================
   function tickAnimationLoop(ts) {
     if (!state.lastFrameTs) state.lastFrameTs = ts;
     const dtSec = Math.min(0.15, Math.max(0.001, (ts - state.lastFrameTs) / 1000));
     state.lastFrameTs = ts;
 
-    // 1. Kinematic step (Dead Reckoning OR Virtual Demo Drive)
+    // 1. Kinematic step (Dead Reckoning OR Virtual Demo Drive along -3.5m left-lane route)
     if (state.gps.isDeadReckoning) {
       const drSpeedMps = state.sim.tunnelLost
         ? state.sim.demoSpeedKmh / 3.6
@@ -2022,97 +2029,86 @@
       }
     }
 
-    // 2. Smooth display interpolation & left-lane coordinate alignment at live map zoom
-    const smoothFactor = Math.min(1, dtSec * 10);
-    state.displayCoords[0] += (state.vehicle.coords[0] - state.displayCoords[0]) * smoothFactor;
-    state.displayCoords[1] += (state.vehicle.coords[1] - state.displayCoords[1]) * smoothFactor;
-    state.displayHeading = Geo.lerpBearing(state.displayHeading, state.vehicle.heading, smoothFactor);
+    // 2. Smooth vehicle display pose interpolation
+    const vehicleLerp = Math.min(1, dtSec * 12);
+    state.displayCoords[0] += (state.vehicle.coords[0] - state.displayCoords[0]) * vehicleLerp;
+    state.displayCoords[1] += (state.vehicle.coords[1] - state.displayCoords[1]) * vehicleLerp;
+    state.displayHeading = Geo.lerpBearing(state.displayHeading, state.vehicle.heading, vehicleLerp);
 
-    const liveZoom = state.map && state.mapReady ? state.map.getZoom() : state.currentZoom;
-    state.displayLaneCoords = computeLeftLaneCoords(
-      state.displayCoords,
-      state.displayHeading,
-      liveZoom
-    );
-
-    // 3. Per-frame turf.distance proximity check, per-frame queryRenderedFeatures hit-test & Mountain curve check
-    if (state.routeModel) {
-      evaluateCloseZoomEveryFrame(true);
-    }
+    // 3. Per-frame continuous Smoothstep camera target, bridge hit-test & Mountain curve
+    evaluateContinuousCameraTarget();
     evaluateElevationAndSeeThrough(ts, false);
     evaluateMountainCurveThrottled(ts, false);
 
-    // 4. Native Mapbox Marker update & dirty-checked Camera update
+    // 4. WebGL 3D Car Pose & Silky 0.08-Damped Camera Update
     if (state.map && state.mapReady) {
       const groundElev =
         (typeof state.map.queryTerrainElevation === 'function'
-          ? state.map.queryTerrainElevation(state.displayLaneCoords, { exaggerated: false })
+          ? state.map.queryTerrainElevation(state.displayCoords, { exaggerated: false })
           : 0) || 0;
       state.elevation.groundElevationM = groundElev;
       if (state.mode === 'mountain') {
         state.vehicle.altitudeM = Math.round(groundElev);
       }
 
-      if (state.egoMarker) {
-        state.egoMarker.setLngLat(state.displayLaneCoords);
-        state.egoMarker.setRotation(state.displayHeading);
-        syncEgoMarkerScaleAndClasses(liveZoom);
+      if (state.car3d) {
+        state.car3d.updatePose({
+          lng: state.displayCoords[0],
+          lat: state.displayCoords[1],
+          heading: state.displayHeading,
+          heightOffsetM: state.settings.carHeightOffsetM,
+          isDeadReckoning: state.gps.isDeadReckoning,
+          underpassSeeThrough: state.elevation.state === 'underpass',
+        });
       }
 
-      if (state.followCamera && !state.isEasingCamera) {
-        const speedKmh = state.vehicle.speedMps * 3.6;
-        const desiredZoom = Geo.computeSpeedAdaptiveZoom(
-          state.mode,
-          speedKmh,
-          state.isCloseZoomActive
-        );
-        const desiredPitch = Geo.computeTargetPitch(state.mode, state.isCloseZoomActive);
+      if (state.followCamera) {
+        // Continuous frame-rate-normalized damping (~0.08 per 60fps frame)
+        const baseDamp = Number.isFinite(CFG.cameraDamping) ? CFG.cameraDamping : 0.08;
+        const damp = 1 - Math.pow(1 - baseDamp, dtSec * 60);
 
-        const zoomLerp = Math.min(1, dtSec * 3.0);
-        state.currentZoom += (desiredZoom - state.currentZoom) * zoomLerp;
-        state.currentPitch += (desiredPitch - state.currentPitch) * zoomLerp;
+        state.cam.zoom += (state.cam.targetZoom - state.cam.zoom) * damp;
+        state.cam.pitch += (state.cam.targetPitch - state.cam.pitch) * damp;
+        state.cam.bearing = Geo.lerpBearing(state.cam.bearing, state.displayHeading, damp);
+        state.cam.center[0] += (state.displayCoords[0] - state.cam.center[0]) * damp;
+        state.cam.center[1] += (state.displayCoords[1] - state.cam.center[1]) * damp;
 
         const pad = getCockpitPadding();
-        const camLaneCoords = computeLeftLaneCoords(
-          state.displayCoords,
-          state.displayHeading,
-          state.currentZoom
-        );
         if (
           cameraHasChanged(
-            camLaneCoords,
-            state.displayHeading,
-            state.currentZoom,
-            state.currentPitch,
+            state.cam.center,
+            state.cam.bearing,
+            state.cam.zoom,
+            state.cam.pitch,
             pad.top
           )
         ) {
           state.map.jumpTo({
-            center: camLaneCoords,
-            bearing: state.displayHeading,
-            zoom: state.currentZoom,
-            pitch: state.currentPitch,
+            center: state.cam.center,
+            bearing: state.cam.bearing,
+            zoom: state.cam.zoom,
+            pitch: state.cam.pitch,
             padding: pad,
           });
           recordCameraSnapshot(
-            camLaneCoords,
-            state.displayHeading,
-            state.currentZoom,
-            state.currentPitch,
+            state.cam.center,
+            state.cam.bearing,
+            state.cam.zoom,
+            state.cam.pitch,
             pad.top
           );
         }
       }
     }
 
-    // 4. Instrument cluster & menu telemetry readouts
+    // 5. Instrument cluster & Settings telemetry readouts
     renderSpeedometerAndTelemetry();
 
     requestAnimationFrame(tickAnimationLoop);
   }
 
   // =========================================================================
-  // Navigation Analytics (Steps / Highway Branch / Route Progress)
+  // Navigation Analytics & HUD Updates
   // =========================================================================
   function updateNavigationAnalytics() {
     if (!state.routeModel) {
@@ -2125,9 +2121,6 @@
     refreshGuidanceUi();
   }
 
-  // =========================================================================
-  // HUD Rendering Updates (Left Edge Tesla Panel + Menu Telemetry)
-  // =========================================================================
   function renderSpeedometerAndTelemetry() {
     const speedKmh = Math.max(0, Math.round(state.vehicle.speedMps * 3.6));
     dom.speedValue.textContent = String(speedKmh);
@@ -2151,24 +2144,16 @@
     if (state.menuOpen) {
       dom.dbgZoom.textContent = state.map
         ? state.map.getZoom().toFixed(2)
-        : state.currentZoom.toFixed(2);
+        : state.cam.zoom.toFixed(2);
       dom.dbgPitch.textContent = state.map
-        ? `${Math.round(state.map.getPitch())}°`
-        : `${Math.round(state.currentPitch)}°`;
+        ? `${state.map.getPitch().toFixed(1)}°`
+        : `${state.cam.pitch.toFixed(1)}°`;
+      dom.dbgApproach.textContent = state.cam.easedT.toFixed(2);
       const groundM = Math.round(state.elevation.groundElevationM || 0);
-      dom.dbgElev.textContent =
-        state.elevation.state === 'underpass'
-          ? `${groundM}m (透過)`
-          : `${groundM}m`;
-      dom.dbgAutoZoom.textContent = state.sim.forceCloseZoom
-        ? 'FORCED'
-        : state.autoCloseZoomActive
-        ? 'ACTIVE'
-        : 'OFF';
+      dom.dbgElev.textContent = `${groundM}m`;
+      const sign = state.settings.carHeightOffsetM > 0 ? '+' : '';
+      dom.dbgCarZ.textContent = `${sign}${state.settings.carHeightOffsetM.toFixed(1)}m`;
       dom.dbgDrMode.textContent = state.gps.isDeadReckoning ? state.gps.drMode : 'OFF';
-      dom.dbgBranch.textContent = Number.isFinite(state.lastManeuverDirectDistM)
-        ? Geo.formatDistanceJa(state.lastManeuverDirectDistM)
-        : '--';
     }
   }
 
@@ -2203,7 +2188,8 @@
 
     if (!nav) {
       dom.maneuverIconBox.innerHTML = getManeuverSvg('straight');
-      dom.guidanceDistance.textContent = mode === 'highway' ? '高速巡航' : mode === 'mountain' ? '山岳走行' : '案内待機';
+      dom.guidanceDistance.textContent =
+        mode === 'highway' ? '高速巡航' : mode === 'mountain' ? '山岳走行' : '案内待機';
       dom.guidanceTag.textContent =
         mode === 'highway' ? 'IC / JCT 監視' : mode === 'mountain' ? '3D地形・カーブ解析' : 'Standard 3D';
       dom.zoomActivePill.classList.toggle('hidden', !state.sim.forceCloseZoom);
@@ -2213,25 +2199,24 @@
     }
 
     if (mode === 'highway') {
-      const branch = state.closeZoomStep || nav.nextBranch;
-      const distMeters = Number.isFinite(state.lastManeuverDirectDistM)
-        ? state.lastManeuverDirectDistM
+      const branch = state.cam.approachStep || nav.nextBranch;
+      const distMeters = Number.isFinite(state.cam.lastManeuverDistM)
+        ? state.cam.lastManeuverDistM
         : nav.distToBranchMeters;
 
       dom.maneuverIconBox.innerHTML = getManeuverSvg(branch.maneuverKey);
       dom.guidanceDistance.textContent = Geo.formatDistanceJa(distMeters);
       dom.guidanceTag.textContent = nav.isFallbackBranch ? '次の分岐' : branch.branchTag;
-      dom.zoomActivePill.classList.toggle('hidden', !state.isCloseZoomActive);
+      dom.zoomActivePill.classList.toggle('hidden', !state.cam.isApproaching);
       dom.zoomActivePill.textContent = state.sim.forceCloseZoom ? '強制ZOOM' : 'JCT 3D';
       dom.guidanceInstruction.textContent = branch.title || branch.instruction;
       return;
     }
 
-    // City & Mountain Mode turn guidance
-    const step = state.closeZoomStep || nav.nextStep;
+    const step = state.cam.approachStep || nav.nextStep;
     const distMeters =
-      mode === 'city' && Number.isFinite(state.lastManeuverDirectDistM)
-        ? state.lastManeuverDirectDistM
+      mode === 'city' && Number.isFinite(state.cam.lastManeuverDistM)
+        ? state.cam.lastManeuverDistM
         : nav.distToStepMeters;
 
     dom.maneuverIconBox.innerHTML = getManeuverSvg(step.maneuverKey);
@@ -2242,19 +2227,49 @@
         : mode === 'mountain'
         ? '次の案内'
         : '次の交差点';
-    dom.zoomActivePill.classList.toggle('hidden', !state.isCloseZoomActive);
+    dom.zoomActivePill.classList.toggle('hidden', !state.cam.isApproaching);
     dom.zoomActivePill.textContent = state.sim.forceCloseZoom ? '強制ZOOM' : '交差点3D';
     dom.guidanceInstruction.textContent = step.instruction || step.title;
   }
 
   // =========================================================================
-  // Menu Drawer, Presets & Event Bindings
+  // Full-Screen Automotive Menu Controller, Presets & Event Bindings
   // =========================================================================
-  function setMenuDrawerOpen(open) {
+  function setMenuOpen(open, tabName = null) {
     state.menuOpen = Boolean(open);
-    dom.menuDrawer.classList.toggle('collapsed', !state.menuOpen);
+    dom.fullscreenMenu.classList.toggle('collapsed', !state.menuOpen);
     dom.btnMenuToggle.classList.toggle('is-lit', state.menuOpen);
     dom.btnMenuToggle.setAttribute('aria-expanded', String(state.menuOpen));
+    if (state.menuOpen) {
+      if (tabName) setMenuTab(tabName);
+      renderRouteTimeline();
+    }
+  }
+
+  function setMenuTab(tabName) {
+    if (!dom.menuTabPanels[tabName]) return;
+    state.activeMenuTab = tabName;
+
+    dom.menuTabBtns.forEach((btn) => {
+      const isActive = btn.dataset.tab === tabName;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-selected', String(isActive));
+    });
+
+    Object.entries(dom.menuTabPanels).forEach(([key, panel]) => {
+      panel.classList.toggle('active', key === tabName);
+    });
+
+    if (tabName === 'route') {
+      renderRouteTimeline();
+    }
+  }
+
+  function setRoutePreference(pref) {
+    if (pref !== 'highway' && pref !== 'local') return;
+    state.routePreference = pref;
+    dom.btnRoutePrefHighway.classList.toggle('active', pref === 'highway');
+    dom.btnRoutePrefLocal.classList.toggle('active', pref === 'local');
   }
 
   function setPinMode(active) {
@@ -2264,7 +2279,7 @@
       state.map.getCanvas().style.cursor = active ? 'crosshair' : '';
     }
     if (active) {
-      setMenuDrawerOpen(false);
+      setMenuOpen(false);
       showToast('マップ上の任意の場所をタップして目的地を設定できます');
     }
   }
@@ -2276,15 +2291,15 @@
       btn.type = 'button';
       btn.className = 'preset-card';
       btn.innerHTML = `
-        <div>
-          <div class="preset-name"></div>
-          <div class="preset-desc"></div>
+        <div class="preset-card-top">
+          <span class="preset-name"></span>
+          <span class="preset-badge"></span>
         </div>
-        <span class="preset-badge"></span>
+        <div class="preset-desc"></div>
       `;
       btn.querySelector('.preset-name').textContent = preset.name;
-      btn.querySelector('.preset-desc').textContent = preset.desc;
       btn.querySelector('.preset-badge').textContent = preset.badge;
+      btn.querySelector('.preset-desc').textContent = preset.desc;
       btn.addEventListener('click', () => loadDemoPreset(preset, true));
       container.appendChild(btn);
     });
@@ -2308,43 +2323,53 @@
   }
 
   function bindUiEvents() {
-    // Right Slim Dock (Items 2, 3, 4; Item 1 is non-button Clock)
+    // Left Black Hardware Bezel Touch Switches
     dom.btnModeCycle.addEventListener('click', cycleDrivingMode);
-    dom.btnMenuToggle.addEventListener('click', () => setMenuDrawerOpen(!state.menuOpen));
-    dom.btnRecenter.addEventListener('click', () => setFollowCamera(true));
+    dom.btnMenuToggle.addEventListener('click', () => setMenuOpen(!state.menuOpen));
+    dom.btnRecenter.addEventListener('click', () => {
+      if (state.menuOpen) setMenuOpen(false);
+      setFollowCamera(true);
+    });
 
-    // Menu Drawer Controls
-    dom.btnMenuClose.addEventListener('click', () => setMenuDrawerOpen(false));
+    // Full-Screen Menu Header & Category Tabs
+    dom.btnMenuClose.addEventListener('click', () => setMenuOpen(false));
+    dom.menuTabBtns.forEach((btn) => {
+      btn.addEventListener('click', () => setMenuTab(btn.dataset.tab));
+    });
+
+    // Tab 1: Destination Search & Map Tap Mode
     dom.searchForm.addEventListener('submit', (e) => {
       e.preventDefault();
-      searchPlaces(dom.searchInput.value);
+      searchDestinationPlaces(dom.searchInput.value);
     });
     dom.btnMapPinMode.addEventListener('click', () => setPinMode(!state.pinModeActive));
+
+    // Tab 2: Route Edit (Waypoints, Highway/Local Preference, Recalculate, Clear)
+    dom.btnRoutePrefHighway.addEventListener('click', async () => {
+      setRoutePreference('highway');
+      if (state.destination) await recalculateActiveRoute(false);
+    });
+    dom.btnRoutePrefLocal.addEventListener('click', async () => {
+      setRoutePreference('local');
+      if (state.destination) await recalculateActiveRoute(false);
+    });
+    dom.btnRouteRecalc.addEventListener('click', () => recalculateActiveRoute(false));
+    dom.waypointSearchForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      searchWaypointPlaces(dom.waypointSearchInput.value);
+    });
     dom.btnClearRoute.addEventListener('click', clearActiveRoute);
 
     // Pin Confirmation
     dom.btnPinRoute.addEventListener('click', () => {
       if (state.pendingPin) {
+        state.waypoints = [];
         setDestinationAndFetchRoute(state.pendingPin.coords, state.pendingPin.name);
       }
     });
     dom.btnPinCancel.addEventListener('click', clearPendingPin);
 
-    // System Utilities inside Menu Drawer
-    dom.btnWakelock.addEventListener('click', () => {
-      if (state.wakeLock.sentinel) {
-        releaseWakeLock();
-      } else {
-        requestWakeLock(false);
-      }
-    });
-    dom.btnFullscreen.addEventListener('click', toggleFullscreenLandscape);
-    dom.btnTokenSettings.addEventListener('click', () => {
-      setMenuDrawerOpen(false);
-      openTokenModal(Boolean(state.accessToken));
-    });
-
-    // Demo Drive Toggle
+    // Tab 3: Demo Drive & Speed Slider
     dom.toggleDemoMode.addEventListener('change', async () => {
       const enabled = dom.toggleDemoMode.checked;
       if (enabled && !state.routeModel) {
@@ -2360,7 +2385,7 @@
         state.vehicle.speedMps = state.sim.demoSpeedKmh / 3.6;
         state.gps.lastValidSpeedMps = state.vehicle.speedMps;
         setFollowCamera(true);
-        setMenuDrawerOpen(false);
+        setMenuOpen(false);
         showToast(`デモ走行 ON（${state.sim.demoSpeedKmh} km/h）`);
       } else {
         state.vehicle.speedMps = 0;
@@ -2396,31 +2421,39 @@
       state.vehicle.isSnappedToRoute = true;
       state.displayCoords = [...state.vehicle.coords];
       state.displayHeading = state.vehicle.heading;
-      state.autoCloseZoomActive = false;
-      state.isCloseZoomActive = state.sim.forceCloseZoom;
-      state.lastCamApplied = null;
+      state.cam.center = [...state.displayCoords];
+      state.cam.bearing = state.displayHeading;
+      state.cam.lastApplied = null;
       resetMountainCurveDisplay();
       updateJctBeaconOnMap(null);
       syncRouteSourcesToMap();
       updateNavigationAnalytics();
+      evaluateContinuousCameraTarget();
       evaluateElevationAndSeeThrough(performance.now(), true);
-      evaluateCloseZoomEveryFrame(false);
       evaluateMountainCurveThrottled(performance.now(), true);
       setFollowCamera(true);
       showToast('スタート地点へ戻しました');
     });
 
-    // Underpass Overhead See-Through Force Toggle
+    // Tab 3: Vehicle Height Offset Fine-Tune Slider (-5m .. +20m)
+    dom.sliderCarHeight.addEventListener('input', (e) => setCarHeightOffset(e.target.value));
+    dom.btnCarHeightReset.addEventListener('click', () => {
+      setCarHeightOffset(0);
+      showToast('車両の高さオフセットを 0.0m へリセットしました');
+    });
+
+    // Tab 3: Day/Night Light Preset Selector (Night / Dusk / Day)
+    dom.lightPresetBtns.forEach((btn) => {
+      btn.addEventListener('click', () => setLightPreset(btn.dataset.lightPreset));
+    });
+
+    // Tab 3: Underpass See-Through, Tunnel DR & Forced 3D Zoom Toggles
     dom.toggleUnderpassSeeThrough.addEventListener('change', () => {
       setForceUnderpassSeeThrough(dom.toggleUnderpassSeeThrough.checked);
     });
-
-    // Force Intersection / JCT 3D Zoom Toggle
     dom.toggleForceCloseZoom.addEventListener('change', () => {
       setForceCloseZoom(dom.toggleForceCloseZoom.checked);
     });
-
-    // Tunnel / GPS Lost Toggle
     dom.toggleTunnelSim.addEventListener('change', () => {
       const lost = dom.toggleTunnelSim.checked;
       state.sim.tunnelLost = lost;
@@ -2433,6 +2466,20 @@
         exitDeadReckoning();
         showToast('トンネル脱出 — GPSオンライン復帰');
       }
+    });
+
+    // Tab 3: System Utilities
+    dom.btnWakelock.addEventListener('click', () => {
+      if (state.wakeLock.sentinel) {
+        releaseWakeLock();
+      } else {
+        requestWakeLock(false);
+      }
+    });
+    dom.btnFullscreen.addEventListener('click', toggleFullscreenLandscape);
+    dom.btnTokenSettings.addEventListener('click', () => {
+      setMenuOpen(false);
+      openTokenModal(Boolean(state.accessToken));
     });
 
     // Token Modal
@@ -2459,10 +2506,10 @@
   window.__AERO_NAVI__ = {
     getState: () => state,
     getMap: () => state.map,
-    getEgoMarker: () => state.egoMarker,
-    getDisplayLaneCoords: () => state.displayLaneCoords,
+    getCar3d: () => state.car3d,
     evaluateMountainCurve: (ts, force) => evaluateMountainCurveThrottled(ts, force),
     evaluateElevation: (ts, force) => evaluateElevationAndSeeThrough(ts, force),
+    evaluateContinuousCamera: () => evaluateContinuousCameraTarget(),
   };
 
   // =========================================================================
@@ -2474,6 +2521,8 @@
 
     updateModeButtonsUi(state.mode);
     renderPresetButtons(dom.presetList);
+    renderRouteTimeline();
+    setCarHeightOffset(0);
     bindUiEvents();
     updateGpsStatusUi();
     updateElevationBadgeUi();

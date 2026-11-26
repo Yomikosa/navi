@@ -23,7 +23,13 @@ const APP_CONFIG = {
   defaultCenter: [139.701636, 35.658034],
   defaultBearing: 35,
 
-  // 走行モード別カメラ＆自動至近距離ズーム設定（バンパー／ドラレコ視点）
+  // 日本の左側走行車線オフセット（turf.lineOffset でルート座標自体を左へ 3.5m シフト）
+  leftLaneOffsetMeters: -3.5,
+
+  // カメラ連続ダンピング係数（毎フレーム current += (target - current) * 0.08 相当）
+  cameraDamping: 0.08,
+
+  // 走行モード別カメラ＆距離連動 Smoothstep 連続補間設定
   modes: {
     city: {
       id: 'city',
@@ -31,11 +37,11 @@ const APP_CONFIG = {
       code: 'CITY',
       baseZoom: 19.2,
       pitch: 75,
-      // 交差点の右左折 150m 手前〜通過まで自動至近距離ズーム
-      closeZoomTriggerMeters: 150,
-      closeZoomReleaseMeters: 185,
-      closeZoomPassClearMeters: -30,
-      closeZoom: 20.3,
+      // 交差点の右左折 250m → 30m の間で連続的にズームイン
+      approachStartMeters: 250,
+      approachEndMeters: 30,
+      closeZoomPassClearMeters: -25,
+      closeZoom: 20.4,
       closePitch: 80,
       enableTerrain: false,
       terrainExaggeration: 0,
@@ -46,9 +52,9 @@ const APP_CONFIG = {
       code: 'HWY',
       baseZoom: 16.8,
       pitch: 68,
-      // JCT・IC・分岐 800m 手前〜通過まで自動至近距離ズーム
-      closeZoomTriggerMeters: 800,
-      closeZoomReleaseMeters: 900,
+      // JCT・IC・分岐 1000m → 150m の間で連続的にズームイン
+      approachStartMeters: 1000,
+      approachEndMeters: 150,
       closeZoomPassClearMeters: -45,
       closeZoom: 19.5,
       closePitch: 78,
@@ -61,8 +67,8 @@ const APP_CONFIG = {
       code: 'MTN',
       baseZoom: 18.2,
       pitch: 72,
-      closeZoomTriggerMeters: 0,
-      closeZoomReleaseMeters: 0,
+      approachStartMeters: 0,
+      approachEndMeters: 0,
       closeZoomPassClearMeters: -30,
       closeZoom: 19.5,
       closePitch: 78,
@@ -82,34 +88,44 @@ const APP_CONFIG = {
     minHeadingSpeedMps: 1.2,    // 位置差分から方位を算出する最小速度
   },
 
-  // ワンタップで全モードの実ルート動作を検証できるデモコース
+  // 全画面メニュー「目的地」タブのワンタップ クイック目的地プリセット（4大スポット）
   demoPresets: [
     {
-      id: 'city-tokyo',
+      id: 'city-tokyo-station',
       mode: 'city',
       badge: '市街地',
-      name: '渋谷駅 → 東京駅',
-      desc: '交差点150m自動ズーム・車線＆3D建物確認',
+      name: '東京駅（丸の内）',
+      desc: '渋谷駅→東京駅 · 交差点250m→30m連続ズーム',
       origin: [139.701636, 35.658034],
       destination: [139.767125, 35.681236],
       defaultSpeedKmh: 45,
     },
     {
-      id: 'highway-shuto',
+      id: 'city-shibuya-scramble',
+      mode: 'city',
+      badge: '市街地 3D',
+      name: '渋谷スクランブル交差点',
+      desc: '表参道→渋谷 · 高密度3D建物＆左車線確認',
+      origin: [139.7126, 35.6652],
+      destination: [139.700571, 35.659482],
+      defaultSpeedKmh: 40,
+    },
+    {
+      id: 'highway-ohashi-jct',
       mode: 'highway',
       badge: '高速・JCT',
-      name: '芝公園(首都高) → 大黒PA',
-      desc: 'JCT/IC 800m自動ズーム・3D立体交差確認',
-      origin: [139.7495, 35.6542],
-      destination: [139.6801, 35.4616],
-      defaultSpeedKmh: 95,
+      name: '首都高・大橋JCT',
+      desc: '渋谷入口→大橋JCT→用賀 · 3D立体交差＆1000m連続ズーム',
+      origin: [139.7062, 35.6584],
+      destination: [139.6318, 35.6277],
+      defaultSpeedKmh: 85,
     },
     {
       id: 'mountain-hakone',
       mode: 'mountain',
       badge: '山岳',
-      name: '箱根ターンパイク → 大観山',
-      desc: '3D地形・前方100〜250mペースノート確認',
+      name: '箱根ターンパイク（大観山）',
+      desc: '早川→大観山 · 3D地形＆イニシャルD風カーブ案内',
       origin: [139.1367, 35.2374],
       destination: [139.0488, 35.1842],
       defaultSpeedKmh: 65,

@@ -159,10 +159,11 @@
     for (let i = 0; i < coords.length; i++) {
       const c = coords[i];
       if (!Array.isArray(c) || c.length < 2) continue;
+      if (!Number.isFinite(c[0]) || !Number.isFinite(c[1])) continue;
       if (
         out.length === 0 ||
-        Math.abs(out[out.length - 1][0] - c[0]) > 1e-7 ||
-        Math.abs(out[out.length - 1][1] - c[1]) > 1e-7
+        Math.abs(out[out.length - 1][0] - c[0]) > 1e-6 ||
+        Math.abs(out[out.length - 1][1] - c[1]) > 1e-6
       ) {
         out.push([c[0], c[1]]);
       }
@@ -171,25 +172,70 @@
   }
 
   /**
-   * Build an indexed RouteModel from a Mapbox Directions API route object.
+   * Shift a LineString Feature laterally via turf.lineOffset (default -3.5m = Japan left driving lane).
+   * Validates finite coordinates and falls back cleanly if degenerate geometry is encountered.
    */
-  function buildRouteModel(route) {
+  function applyLeftLaneLineOffset(centerLine, offsetMeters = -3.5) {
+    if (!centerLine || !offsetMeters || typeof turf.lineOffset !== 'function') {
+      return centerLine;
+    }
+    try {
+      const shifted = turf.lineOffset(centerLine, offsetMeters, { units: 'meters' });
+      const rawCoords =
+        shifted && shifted.geometry && Array.isArray(shifted.geometry.coordinates)
+          ? shifted.geometry.coordinates
+          : null;
+      if (!rawCoords || rawCoords.length < 2) return centerLine;
+
+      const clean = sanitizeCoords(rawCoords);
+      if (clean.length < 2) return centerLine;
+      return turf.lineString(clean);
+    } catch (_err) {
+      return centerLine;
+    }
+  }
+
+  /**
+   * Build an indexed RouteModel from a Mapbox Directions API route object.
+   * Immediately shifts the route geometry -3.5m left via `turf.lineOffset` so BOTH
+   * the drawn route ribbon and the 3D ego vehicle follow the Japanese left driving lane.
+   */
+  function buildRouteModel(route, options = {}) {
     if (!route || !route.geometry || !Array.isArray(route.geometry.coordinates)) {
       throw new Error('Invalid route geometry');
     }
 
-    const coords = sanitizeCoords(route.geometry.coordinates);
-    if (coords.length < 2) {
+    const centerCoords = sanitizeCoords(route.geometry.coordinates);
+    if (centerCoords.length < 2) {
       throw new Error('Route must contain at least 2 distinct points');
     }
 
-    const line = turf.lineString(coords);
-    const totalKm = turf.length(line, { units: 'kilometers' });
-    const leg = (route.legs && route.legs[0]) || { steps: [], annotation: null };
-    const rawSteps = Array.isArray(leg.steps) ? leg.steps : [];
+    const offsetMeters = Number.isFinite(options.leftLaneOffsetMeters)
+      ? options.leftLaneOffsetMeters
+      : -3.5;
 
-    // Map each step monotonically along the full route LineString.
-    // Directions step.distance is the distance from step[i] maneuver to step[i+1] maneuver.
+    const centerline = turf.lineString(centerCoords);
+    const line = applyLeftLaneLineOffset(centerline, offsetMeters);
+    const coords = line.geometry.coordinates;
+    const totalKm = turf.length(line, { units: 'kilometers' });
+
+    // Flatten steps across ALL legs (supports multi-waypoint Route Editing seamlessly)
+    const legs = Array.isArray(route.legs) && route.legs.length > 0
+      ? route.legs
+      : [{ steps: [], annotation: null }];
+    const rawSteps = [];
+    legs.forEach((leg, legIdx) => {
+      const legSteps = Array.isArray(leg.steps) ? leg.steps : [];
+      legSteps.forEach((st, stIdx) => {
+        // Skip redundant intermediate 'depart' step right after a waypoint 'arrive'
+        if (legIdx > 0 && stIdx === 0 && st.maneuver && st.maneuver.type === 'depart') {
+          return;
+        }
+        rawSteps.push(st);
+      });
+    });
+
+    // Map each step monotonically along the left-lane shifted route LineString.
     let expectedDistKm = 0;
     let prevMappedKm = 0;
 
@@ -262,11 +308,14 @@
       };
     });
 
-    const annotation = leg.annotation || null;
+    const annotation = legs[0] ? legs[0].annotation || null : null;
 
     return {
       line,
+      centerline,
+      offsetMeters,
       coords,
+      centerCoords,
       totalKm,
       totalMeters: route.distance || totalKm * 1000,
       totalDurationSec: route.duration || 0,
@@ -438,56 +487,149 @@
   }
 
   /**
-   * Per-frame proximity auto-3D zoom evaluator using direct `turf.distance`
-   * against every upcoming `routes[0].legs[0].steps[i].maneuver.location`.
-   *
-   * - City Mode: triggers <= 150m before intersection turn -> zoom 20.3, pitch 80
-   * - Highway Mode: triggers <= 800m before JCT/IC/branch -> zoom 19.5, pitch 78
-   * - Releases cleanly once passed (~30m City / ~45m Highway past maneuver).
+   * Cubic Hermite smoothstep easing: t * t * (3 - 2 * t)
+   */
+  function smoothstep(t) {
+    const c = clamp(t, 0, 1);
+    return c * c * (3 - 2 * c);
+  }
+
+  /**
+   * Continuous distance-driven Smoothstep camera target calculator (zero discrete jumps):
+   * - City Mode:
+   *     >= 250m: zoom 19.2, pitch 75
+   *     250m -> 30m: t = 1 - clamp((dist - 30) / (250 - 30), 0, 1), eased = smoothstep(t)
+   *                  zoom 19.2 -> 20.4, pitch 75 -> 80
+   * - Highway Mode:
+   *     >= 1000m: zoom 16.8, pitch 68
+   *     1000m -> 150m: t = 1 - clamp((dist - 150) / (1000 - 150), 0, 1), eased = smoothstep(t)
+   *                    zoom 16.8 -> 19.5, pitch 68 -> 78
+   * - Mountain Mode:
+   *     base zoom 18.2, pitch 72 (forced close-up -> 19.5 / 78)
+   */
+  function computeContinuousApproachCamera(modeId, distMeters, forceCloseZoom, modeCfg) {
+    const cfg = modeCfg || {};
+    const baseZoom = Number.isFinite(cfg.baseZoom)
+      ? cfg.baseZoom
+      : modeId === 'highway'
+      ? 16.8
+      : modeId === 'mountain'
+      ? 18.2
+      : 19.2;
+    const basePitch = Number.isFinite(cfg.pitch)
+      ? cfg.pitch
+      : modeId === 'highway'
+      ? 68
+      : modeId === 'mountain'
+      ? 72
+      : 75;
+    const closeZoom = Number.isFinite(cfg.closeZoom)
+      ? cfg.closeZoom
+      : modeId === 'city'
+      ? 20.4
+      : 19.5;
+    const closePitch = Number.isFinite(cfg.closePitch)
+      ? cfg.closePitch
+      : modeId === 'city'
+      ? 80
+      : 78;
+
+    if (forceCloseZoom) {
+      return {
+        t: 1,
+        eased: 1,
+        targetZoom: closeZoom,
+        targetPitch: closePitch,
+        active: true,
+      };
+    }
+
+    const startM = Number.isFinite(cfg.approachStartMeters)
+      ? cfg.approachStartMeters
+      : modeId === 'highway'
+      ? 1000
+      : modeId === 'city'
+      ? 250
+      : 0;
+    const endM = Number.isFinite(cfg.approachEndMeters)
+      ? cfg.approachEndMeters
+      : modeId === 'highway'
+      ? 150
+      : modeId === 'city'
+      ? 30
+      : 0;
+
+    if (startM <= endM || !Number.isFinite(distMeters)) {
+      return {
+        t: 0,
+        eased: 0,
+        targetZoom: baseZoom,
+        targetPitch: basePitch,
+        active: false,
+      };
+    }
+
+    const t = 1 - clamp((distMeters - endM) / (startM - endM), 0, 1);
+    const eased = smoothstep(t);
+    return {
+      t,
+      eased,
+      targetZoom: baseZoom + (closeZoom - baseZoom) * eased,
+      targetPitch: basePitch + (closePitch - basePitch) * eased,
+      active: eased > 0.02,
+    };
+  }
+
+  /**
+   * Per-frame continuous approach distance & Smoothstep camera evaluator against
+   * upcoming route steps (`maneuver.location` + monotonic route distance).
    */
   function evaluateManeuverProximityZoom(
     routeModel,
     currentCoords,
     currentDistKm,
     modeId,
-    currentlyActive,
+    forceCloseZoom,
     modeCfg,
     isSnappedToRoute = true
   ) {
+    const startM =
+      (modeCfg && Number.isFinite(modeCfg.approachStartMeters) && modeCfg.approachStartMeters) || 0;
+
     if (
       !routeModel ||
       !Array.isArray(routeModel.steps) ||
       routeModel.steps.length < 2 ||
       !Array.isArray(currentCoords) ||
-      !modeCfg ||
-      !modeCfg.closeZoomTriggerMeters
+      !modeCfg
     ) {
+      const cam = computeContinuousApproachCamera(modeId, Infinity, Boolean(forceCloseZoom), modeCfg);
       return {
-        active: false,
+        active: cam.active,
         step: null,
         directDistMeters: Infinity,
         routeSignedMeters: Infinity,
-        thresholdMeters: 0,
+        effectiveDistMeters: Infinity,
+        approachT: cam.t,
+        easedT: cam.eased,
+        targetZoom: cam.targetZoom,
+        targetPitch: cam.targetPitch,
+        thresholdMeters: startM,
       };
     }
 
-    const triggerM = modeCfg.closeZoomTriggerMeters;
-    const releaseM = modeCfg.closeZoomReleaseMeters || triggerM * 1.15;
-    const passClearM = modeCfg.closeZoomPassClearMeters || -35;
+    const passClearM = modeCfg.closeZoomPassClearMeters || -30;
     const egoPt = turf.point(currentCoords);
 
-    // Filter candidate steps from routes[0].legs[0].steps (skipping index 0 'depart')
     let candidates = [];
     for (let i = 1; i < routeModel.steps.length; i++) {
       const step = routeModel.steps[i];
       if (!step.maneuver || !Array.isArray(step.maneuver.location)) continue;
 
       const routeSignedMeters = (step.routeDistKm - currentDistKm) * 1000;
-      // Skip maneuvers already passed when snapped to route
       if (isSnappedToRoute && routeSignedMeters <= passClearM) continue;
 
-      const qualifies =
-        modeId === 'highway' ? step.isHighwayBranch : isCityTurnStep(step);
+      const qualifies = modeId === 'highway' ? step.isHighwayBranch : isCityTurnStep(step);
       if (!qualifies) continue;
 
       const directDistMeters = turf.distance(
@@ -498,7 +640,6 @@
       candidates.push({ step, directDistMeters, routeSignedMeters });
     }
 
-    // Highway fallback: if route has no highway-tagged steps, use next turn/arrive step
     if (modeId === 'highway' && candidates.length === 0) {
       for (let i = 1; i < routeModel.steps.length; i++) {
         const step = routeModel.steps[i];
@@ -517,16 +658,21 @@
     }
 
     if (candidates.length === 0) {
+      const cam = computeContinuousApproachCamera(modeId, Infinity, Boolean(forceCloseZoom), modeCfg);
       return {
-        active: false,
+        active: cam.active,
         step: null,
         directDistMeters: Infinity,
         routeSignedMeters: Infinity,
-        thresholdMeters: triggerM,
+        effectiveDistMeters: Infinity,
+        approachT: cam.t,
+        easedT: cam.eased,
+        targetZoom: cam.targetZoom,
+        targetPitch: cam.targetPitch,
+        thresholdMeters: startM,
       };
     }
 
-    // Pick the immediate upcoming maneuver (by route order if snapped, else closest direct distance)
     candidates.sort((a, b) =>
       isSnappedToRoute
         ? a.step.routeDistKm - b.step.routeDistKm
@@ -534,37 +680,35 @@
     );
     const nearest = candidates[0];
 
-    // Use direct turf.distance for deterministic proximity triggering
-    const effectiveDistM = nearest.directDistMeters;
-    const isActive = currentlyActive
-      ? effectiveDistM <= releaseM
-      : effectiveDistM <= triggerM;
+    // Use monotonic route remaining distance when snapped (smoothly clamps to 0 while crossing turn)
+    const effectiveDistMeters = isSnappedToRoute
+      ? Math.max(0, nearest.routeSignedMeters)
+      : nearest.directDistMeters;
+
+    const cam = computeContinuousApproachCamera(
+      modeId,
+      effectiveDistMeters,
+      Boolean(forceCloseZoom),
+      modeCfg
+    );
 
     return {
-      active: isActive,
+      active: cam.active,
       step: nearest.step,
       directDistMeters: nearest.directDistMeters,
       routeSignedMeters: nearest.routeSignedMeters,
-      thresholdMeters: triggerM,
+      effectiveDistMeters,
+      approachT: cam.t,
+      easedT: cam.eased,
+      targetZoom: cam.targetZoom,
+      targetPitch: cam.targetPitch,
+      thresholdMeters: startM,
     };
   }
 
-  /**
-   * Close-range dashcam/bumper camera zoom & pitch profiles:
-   * - City:     normal 19.2 / 75°, intersection <=150m -> 20.3 / 80°
-   * - Highway:  cruise 16.8 / 68° (subtle speed nuance), JCT <=800m -> 19.5 / 78°
-   * - Mountain: normal 18.2 / 72°
-   */
   function computeSpeedAdaptiveZoom(modeId, _speedKmh, isCloseZoomActive) {
-    if (modeId === 'city') {
-      return isCloseZoomActive ? 20.3 : 19.2;
-    }
-
-    if (modeId === 'highway') {
-      return isCloseZoomActive ? 19.5 : 16.8;
-    }
-
-    // Mountain mode
+    if (modeId === 'city') return isCloseZoomActive ? 20.4 : 19.2;
+    if (modeId === 'highway') return isCloseZoomActive ? 19.5 : 16.8;
     return isCloseZoomActive ? 19.5 : 18.2;
   }
 
@@ -970,6 +1114,8 @@
     snapToRoute,
     getNavigationProgress,
     evaluateManeuverProximityZoom,
+    smoothstep,
+    computeContinuousApproachCamera,
     computeSpeedAdaptiveZoom,
     computeTargetPitch,
     analyzeMountainPaceNote,
